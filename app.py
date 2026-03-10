@@ -1,44 +1,66 @@
 """
-Receipt Sorter — single-page Streamlit app.
-Finds images, analyzes with Gemini, shows results, approve, then move & rename.
-Every screen has clear navigation. You can always get back to where you need to be.
+ImageStudio — AI-powered bulk image analysis & editing.
+Clean Streamlit UI with step-by-step wizard flow.
 """
 import asyncio
 import json
 import os
-import shutil
-from collections import Counter
 from datetime import datetime
 from pathlib import Path
 
-import pandas as pd
 import streamlit as st
 
 import config
-from analyzer import analyze_batch, file_hash
-from main import scan_image_paths, already_analyzed_hashes, run_signature
-from sorter import execute, generate_filename
+from analyzer import (
+    analyze_batch,
+    estimate_analysis_cost,
+    estimate_total_edit_cost,
+    scan_image_paths,
+)
+from editor import apply_edits
 
 INPUT_DIR = Path(config.INPUT_DIR).resolve()
 RUNS_DIR = Path(config.RUNS_DIR).resolve()
 OUTPUT_DIR = Path(config.OUTPUT_DIR).resolve()
-BUCKETS = list(config.BUCKETS)
+
+IMAGES_PER_PAGE = 20
+GRID_COLS = 4
 
 
-# ── helpers ──────────────────────────────────────────────────────────────────
+# ── Minimal CSS — only theming, no layout hacks ──────────────────────────────
 
-def list_runs() -> list[Path]:
+def _inject_css():
+    st.markdown("""<style>
+    #MainMenu, footer, header {visibility: hidden;}
+    .stDeployButton {display: none;}
+    [data-testid="stMetric"] {
+        background: #333;
+        border: 1px solid #444;
+        border-radius: 8px;
+        padding: 12px 16px;
+    }
+    [data-testid="stMetricValue"] { font-weight: 700; }
+    .stProgress > div > div {
+        background: linear-gradient(90deg, #2680EB, #56a0f5) !important;
+    }
+    </style>""", unsafe_allow_html=True)
+
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _list_runs() -> list[Path]:
     if not RUNS_DIR.exists():
         return []
     return sorted(
         (f for f in RUNS_DIR.glob("*.json")
          if not f.name.endswith("_errors.json")
-         and not f.name.endswith("_sorted_manifest.json")),
+         and not f.name.endswith("_sorted_manifest.json")
+         and not f.name.endswith("_edit_results.json")),
         key=lambda p: p.name, reverse=True,
     )
 
 
-def load_manifest(path: Path) -> dict | None:
+def _load_manifest(path: Path) -> dict | None:
     try:
         with open(path, encoding="utf-8") as f:
             return json.load(f)
@@ -46,389 +68,234 @@ def load_manifest(path: Path) -> dict | None:
         return None
 
 
-def save_manifest(manifest: dict, path: Path) -> None:
+def _save_manifest(manifest: dict, path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
         json.dump(manifest, f, indent=2)
 
 
-def flag_duplicates(images: list[dict]) -> None:
-    seen: dict[str, str] = {}
-    for img in images:
-        h = img.get("file_hash")
-        if not h:
-            continue
-        if h in seen:
-            img["duplicate_of"] = seen[h]
-        else:
-            seen[h] = img["filename"]
-            img.pop("duplicate_of", None)
-
-
-def preview_new_name(row: dict) -> str:
-    orig = Path(row.get("original_path", "file.jpg"))
-    return generate_filename(row, orig.suffix.lower())
-
-
-def estimate_cost(tok: dict) -> float:
-    return (tok.get("prompt_tokens", 0) * 0.10 + tok.get("completion_tokens", 0) * 0.40) / 1_000_000
-
-
-def go_to(screen: str):
-    """Navigate to a screen. Clears conflicting flags."""
+def _go_to(screen: str):
     clear_map = {
-        "dashboard": ["has_results", "analyzing", "confirm_pending", "sort_result",
+        "dashboard": ["has_results", "analyzing", "processing", "edit_results",
                        "manifest", "images", "manifest_path", "analysis_paths"],
-        "results": ["analyzing", "confirm_pending", "sort_result"],
-        "analyzing": ["has_results", "confirm_pending", "sort_result"],
+        "review": ["analyzing", "processing", "edit_results"],
+        "analyzing": ["has_results", "processing", "edit_results"],
     }
     for k in clear_map.get(screen, []):
         st.session_state.pop(k, None)
-    if screen == "dashboard":
-        pass  # all flags cleared → routes to dashboard
-    elif screen == "results":
+    if screen == "review":
         st.session_state.has_results = True
 
 
-def load_run(path: Path):
-    m = load_manifest(path)
+def _load_run(path: Path):
+    m = _load_manifest(path)
     st.session_state.manifest_path = str(path)
     st.session_state.manifest = m
     st.session_state.images = list((m or {}).get("images", []))
-    flag_duplicates(st.session_state.images)
     st.session_state.has_results = True
-    for k in ("sort_result", "confirm_pending", "analyzing"):
+    for k in ("edit_results", "processing", "analyzing"):
         st.session_state.pop(k, None)
 
 
-def auto_save():
-    """Save current edits back to the run manifest file."""
+def _auto_save():
     manifest = st.session_state.get("manifest")
     path = st.session_state.get("manifest_path")
     images = st.session_state.get("images")
     if manifest and path and images:
         manifest["images"] = images
-        save_manifest(manifest, Path(path))
+        _save_manifest(manifest, Path(path))
 
 
-def full_reset():
-    """Delete all files in to_process/ and processed/. Keeps runs/ intact."""
-    for folder in (INPUT_DIR, OUTPUT_DIR):
-        if folder.exists():
-            shutil.rmtree(folder)
-    INPUT_DIR.mkdir(parents=True, exist_ok=True)
-    for k in list(st.session_state.keys()):
-        del st.session_state[k]
-
-
-def save_uploaded_files(uploaded_files: list) -> int:
-    """Save uploaded files to INPUT_DIR. Returns count saved."""
-    INPUT_DIR.mkdir(parents=True, exist_ok=True)
-    saved = 0
-    for f in uploaded_files:
-        dest = INPUT_DIR / f.name
-        # Avoid overwriting — append number if exists
-        if dest.exists():
-            stem = dest.stem
-            suffix = dest.suffix
-            counter = 1
-            while dest.exists():
-                dest = INPUT_DIR / f"{stem}-{counter}{suffix}"
-                counter += 1
-        dest.write_bytes(f.getbuffer())
-        saved += 1
-    return saved
-
-
-# ── which screen are we on? ─────────────────────────────────────────────────
-
-def current_screen() -> str:
-    if st.session_state.get("sort_result"):
-        return "done"
-    if st.session_state.get("confirm_pending"):
-        return "confirm"
+def _current_screen() -> str:
+    if st.session_state.get("edit_results"):
+        return "complete"
+    if st.session_state.get("processing"):
+        return "processing"
     if st.session_state.get("analyzing"):
         return "analyzing"
     if st.session_state.get("has_results"):
-        return "results"
+        return "review"
     return "dashboard"
 
 
-# ── main ─────────────────────────────────────────────────────────────────────
+def _count_images(folder: Path) -> int:
+    if not folder.exists():
+        return 0
+    return sum(
+        1 for f in folder.rglob("*")
+        if f.is_file() and f.suffix.lower() in config.SUPPORTED_EXTENSIONS
+    )
 
-def _inject_css():
-    st.markdown("""
-    <style>
-    /* Metric cards */
-    [data-testid="stMetric"] {
-        background: linear-gradient(135deg, #16213e 0%, #1a1a3e 100%);
-        border: 1px solid #2d3a5e;
-        border-radius: 12px;
-        padding: 16px 20px;
-    }
-    [data-testid="stMetricValue"] {
-        color: #22c55e;
-        font-weight: 700;
-    }
-    [data-testid="stMetricLabel"] {
-        color: #94a3b8;
-        font-size: 0.85rem;
-    }
 
-    /* Primary buttons */
-    .stButton > button[kind="primary"] {
-        background: linear-gradient(135deg, #22c55e 0%, #16a34a 100%);
-        border: none;
-        border-radius: 8px;
-        font-weight: 600;
-        transition: all 0.2s;
-    }
-    .stButton > button[kind="primary"]:hover {
-        background: linear-gradient(135deg, #16a34a 0%, #15803d 100%);
-        transform: translateY(-1px);
-        box-shadow: 0 4px 12px rgba(34, 197, 94, 0.3);
-    }
-
-    /* Secondary buttons */
-    .stButton > button:not([kind="primary"]) {
-        border: 1px solid #2d3a5e;
-        border-radius: 8px;
-        transition: all 0.2s;
-    }
-    .stButton > button:not([kind="primary"]):hover {
-        border-color: #22c55e;
-        color: #22c55e;
-    }
-
-    /* Data editor / table */
-    [data-testid="stDataFrame"], .stDataFrame {
-        border-radius: 12px;
-        overflow: hidden;
-    }
-
-    /* Expander */
-    .streamlit-expanderHeader {
-        border-radius: 8px;
-    }
-
-    /* Progress bar */
-    .stProgress > div > div {
-        background: linear-gradient(90deg, #22c55e, #3b82f6);
-        border-radius: 8px;
-    }
-
-    /* Dividers */
-    hr {
-        border-color: #2d3a5e !important;
-    }
-
-    /* Sidebar styling */
-    [data-testid="stSidebar"] {
-        background: linear-gradient(180deg, #0f1629 0%, #1a1a2e 100%);
-        border-right: 1px solid #2d3a5e;
-    }
-
-    /* Title */
-    h1 {
-        background: linear-gradient(90deg, #22c55e, #3b82f6);
-        -webkit-background-clip: text;
-        -webkit-text-fill-color: transparent;
-        font-weight: 800;
-    }
-
-    /* Warning / success / error banners */
-    [data-testid="stAlert"] {
-        border-radius: 10px;
-    }
-
-    /* Danger / reset button (targeted by key) */
-    [data-testid="stButton"]:has(button[key*="reset"]) button,
-    .danger-btn button {
-        background: linear-gradient(135deg, #dc2626 0%, #b91c1c 100%) !important;
-        border: none !important;
-        color: white !important;
-        border-radius: 8px;
-        font-weight: 600;
-    }
-    [data-testid="stButton"]:has(button[key*="reset"]) button:hover,
-    .danger-btn button:hover {
-        background: linear-gradient(135deg, #b91c1c 0%, #991b1b 100%) !important;
-        box-shadow: 0 4px 12px rgba(220, 38, 38, 0.4) !important;
-    }
-
-    /* File uploader styling */
-    [data-testid="stFileUploader"] {
-        border: 2px dashed #2d3a5e;
-        border-radius: 12px;
-        padding: 8px;
-    }
-    [data-testid="stFileUploader"]:hover {
-        border-color: #22c55e;
-    }
-    </style>
-    """, unsafe_allow_html=True)
-
+# ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
-    st.set_page_config(page_title="Receipt Sorter", layout="wide")
+    st.set_page_config(
+        page_title="ImageStudio",
+        page_icon="🎨",
+        layout="wide",
+        initial_sidebar_state="collapsed",
+    )
     _inject_css()
 
-    screen = current_screen()
+    screen = _current_screen()
+    _render_sidebar(screen)
 
-    # ── Sidebar (always visible) ─────────────────────────────────────────
-    with st.sidebar:
-        st.markdown("### Receipt Sorter")
-
-        # Navigation — always show a way back
-        if screen != "dashboard":
-            if st.button("← Back to start", use_container_width=True):
-                go_to("dashboard")
-                st.rerun()
-
-        if screen in ("confirm", "done") and st.session_state.get("images"):
-            if st.button("← Back to results", use_container_width=True):
-                go_to("results")
-                st.rerun()
-
-        st.divider()
-
-        # Stats
-        images = st.session_state.get("images", [])
-        manifest = st.session_state.get("manifest") or {}
-
-        if images:
-            n = len(images)
-            approved = sum(1 for r in images if r.get("approved"))
-            st.metric("Images", n)
-            st.metric("Approved", f"{approved} / {n}")
-            errs = len(manifest.get("errors", []))
-            if errs:
-                st.metric("Errors", errs)
-            tok = manifest.get("token_usage")
-            if tok and tok.get("total_tokens"):
-                cost = estimate_cost(tok)
-                st.metric("API cost", f"${cost:.4f}")
-                st.caption(f"{tok['total_tokens']:,} tokens")
-            if manifest.get("test_mode"):
-                st.warning("This was a test run (sample only)")
-        else:
-            if INPUT_DIR.exists():
-                all_paths = scan_image_paths(INPUT_DIR)
-                st.metric("Images in folder", len(all_paths))
-
-        # Run history
-        runs = list_runs()
-        if runs and screen in ("dashboard", "results"):
-            st.divider()
-            st.caption("Previous runs")
-            for r in runs[:5]:
-                m = load_manifest(r)
-                n_imgs = len((m or {}).get("images", [])) if m else 0
-                status = (m or {}).get("status", "?")
-                label = f"{r.stem} ({n_imgs} imgs, {status})"
-                current = st.session_state.get("manifest_path", "")
-                is_current = str(r) == current
-                if is_current:
-                    st.caption(f"▶ {label}")
-                else:
-                    if st.button(label, key=f"run_{r.name}", use_container_width=True):
-                        load_run(r)
-                        st.rerun()
-
-    # ── Route to screen ──────────────────────────────────────────────────
-    if screen == "done":
-        _screen_done()
-    elif screen == "confirm":
-        _screen_confirm()
-    elif screen == "results":
-        _screen_results()
+    if screen == "complete":
+        _screen_complete()
+    elif screen == "processing":
+        _screen_processing()
+    elif screen == "review":
+        _screen_review()
     elif screen == "analyzing":
         _screen_analyzing()
     else:
         _screen_dashboard()
 
 
-# ── SCREEN: Dashboard ────────────────────────────────────────────────────────
+# ── Sidebar ───────────────────────────────────────────────────────────────────
+
+def _render_sidebar(screen: str):
+    with st.sidebar:
+        st.subheader("ImageStudio")
+
+        if screen != "dashboard":
+            if st.button("← Dashboard", use_container_width=True):
+                _go_to("dashboard")
+                st.rerun()
+
+        if screen in ("processing", "complete") and st.session_state.get("images"):
+            if st.button("← Review", use_container_width=True):
+                _go_to("review")
+                st.rerun()
+
+        st.divider()
+
+        images = st.session_state.get("images", [])
+        manifest = st.session_state.get("manifest") or {}
+
+        if images:
+            n = len(images)
+            needs_edit = sum(1 for img in images if img.get("recommendations"))
+            approved = sum(1 for img in images if img.get("approved_edits"))
+            st.metric("Images Analyzed", n)
+            st.metric("Need Edits", needs_edit)
+            st.metric("Approved", approved)
+
+            tok = manifest.get("token_usage")
+            if tok and tok.get("total_tokens"):
+                cost = estimate_analysis_cost(tok)
+                st.metric("API Cost", f"${cost:.4f}")
+
+        runs = _list_runs()
+        if runs and screen in ("dashboard", "review"):
+            st.divider()
+            st.caption("Recent runs")
+            for r in runs[:5]:
+                m = _load_manifest(r)
+                n_imgs = len((m or {}).get("images", [])) if m else 0
+                label = f"{r.stem} ({n_imgs} imgs)"
+                current = st.session_state.get("manifest_path", "")
+                if str(r) == current:
+                    st.caption(f"▶ {label}")
+                else:
+                    if st.button(label, key=f"run_{r.name}", use_container_width=True):
+                        _load_run(r)
+                        st.rerun()
+
+
+# ── SCREEN: Dashboard ─────────────────────────────────────────────────────────
 
 def _screen_dashboard():
-    st.title("Receipt Sorter")
+    st.title("ImageStudio")
+    st.write("AI-powered bulk image analysis and editing. "
+             "Drop your photos in the `to_process/` folder, then analyze them below.")
 
-    if not INPUT_DIR.exists():
-        st.warning(f"Create the **`{config.INPUT_DIR}`** folder and drop your images in it.")
-        if st.button("Refresh"):
-            st.rerun()
-        return
-
-    all_paths = scan_image_paths(INPUT_DIR)
-    if not all_paths:
-        st.warning(f"No images found in **`{config.INPUT_DIR}`**.")
-        st.caption(f"Supported formats: {', '.join(sorted(config.SUPPORTED_EXTENSIONS))}")
-        if st.button("Refresh"):
-            st.rerun()
-        return
-
-    api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
-    if not api_key:
-        st.error("No API key. Add `GEMINI_API_KEY=your_key` to the `.env` file, then refresh.")
-        if st.button("Refresh"):
-            st.rerun()
-        return
-
-    total = len(all_paths)
-    known = already_analyzed_hashes(RUNS_DIR)
-    new_count = sum(1 for p in all_paths if file_hash(p) not in known)
-    already_count = total - new_count
-
-    st.markdown(f"Found **{total}** images in `{config.INPUT_DIR}`")
-    if already_count:
-        st.caption(f"{already_count} already analyzed · {new_count} new")
-
-    # Previous complete run available
-    runs = list_runs()
-    if runs:
-        last = load_manifest(runs[0])
-        if last and last.get("status") == "complete":
-            n_imgs = len(last.get("images", []))
-            tok = last.get("token_usage", {})
-            cost = estimate_cost(tok)
-            st.success(f"Last run analyzed **{n_imgs}** images (cost: ${cost:.4f})")
+    INPUT_DIR.mkdir(parents=True, exist_ok=True)
+    total = _count_images(INPUT_DIR)
 
     st.divider()
 
-    # Actions — always clear what you can do
-    if new_count == 0 and runs:
-        st.info("All images have been analyzed. View results or add more images.")
-        if st.button("View results", type="primary", use_container_width=True):
-            load_run(runs[0])
+    if total == 0:
+        st.info(
+            "**No images found.** Add your images to the `to_process/` folder "
+            "(drag & drop in the file tree on the left), then come back here."
+        )
+        if st.button("Refresh"):
             st.rerun()
         return
 
-    if new_count == 0 and not runs:
-        st.info("All images already analyzed but no run files found. Try adding new images.")
+    # Show count and folder info
+    c1, c2 = st.columns(2)
+    c1.metric("Images Ready", total)
+    c2.metric("Folder", "to_process/")
+
+    # Check API key
+    api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+    if not api_key:
+        st.error("**No API key.** Add `GEMINI_API_KEY=your_key` to the `.env` file, then refresh.")
         return
 
-    col1, col2 = st.columns(2)
+    st.divider()
+    st.subheader("Start Analysis")
+    st.write(
+        f"The AI will look at each image using **{config.ANALYSIS_MODEL}** and recommend:\n\n"
+        f"- **Rotation** — fix sideways or upside-down photos (free, done locally)\n"
+        f"- **Upscale** — increase resolution if below {config.MIN_RESOLUTION_SHORT_SIDE}px (~${config.PRICING.get(config.EDIT_MODEL, {}).get('per_image_2k', 0.20):.2f}/image)\n"
+        f"- **Filters** — color correction, brightness, contrast, etc. (~${config.PRICING.get(config.EDIT_MODEL, {}).get('per_image_2k', 0.20):.2f}/image)\n\n"
+        f"You'll review every recommendation before anything is applied."
+    )
+
+    col1, col2, col3 = st.columns(3)
     with col1:
-        st.markdown(f"**Quick test** — analyze {config.TEST_SAMPLE_SIZE} images to check quality")
-        if st.button(f"Test {config.TEST_SAMPLE_SIZE} images", use_container_width=True):
-            _start_analysis(all_paths, known, test_mode=True)
+        if st.button(f"🧪 Test on {config.TEST_SAMPLE_SIZE} images", use_container_width=True):
+            _start_analysis(test_mode=True)
             st.rerun()
     with col2:
-        st.markdown(f"**Full run** — analyze all {new_count} new images")
-        if st.button(f"Analyze {new_count} images", type="primary", use_container_width=True):
-            _start_analysis(all_paths, known, test_mode=False)
+        if st.button(f"🚀 Analyze all {total} images", type="primary", use_container_width=True):
+            _start_analysis(test_mode=False)
             st.rerun()
+    with col3:
+        runs = _list_runs()
+        if runs:
+            if st.button("📂 Load last run", use_container_width=True):
+                _load_run(runs[0])
+                st.rerun()
+        else:
+            st.button("📂 No previous runs", use_container_width=True, disabled=True)
 
-    if runs:
-        st.divider()
-        if st.button("Or view previous results"):
-            load_run(runs[0])
-            st.rerun()
+    # Preview grid
+    st.divider()
+    st.subheader("Preview")
+    _render_preview(INPUT_DIR, min(total, 8))
 
 
-# ── Analysis logic ───────────────────────────────────────────────────────────
+def _render_preview(folder: Path, max_show: int):
+    files = sorted(
+        (f for f in folder.rglob("*")
+         if f.is_file() and f.suffix.lower() in config.SUPPORTED_EXTENSIONS),
+        key=lambda f: f.name,
+    )[:max_show]
 
-def _start_analysis(all_paths: list[Path], known: set[str], test_mode: bool):
-    paths = [p for p in all_paths if file_hash(p) not in known]
+    if not files:
+        return
+
+    cols = st.columns(min(len(files), GRID_COLS))
+    for i, f in enumerate(files):
+        with cols[i % GRID_COLS]:
+            try:
+                from PIL import Image as PILImage
+                img = PILImage.open(f)
+                img.thumbnail((256, 256))
+                st.image(img, caption=f.name[:25], use_container_width=True)
+            except Exception:
+                st.caption(f.name)
+
+
+# ── Analysis logic ────────────────────────────────────────────────────────────
+
+def _start_analysis(test_mode: bool):
+    paths = scan_image_paths(INPUT_DIR)
     if test_mode:
         paths = paths[:config.TEST_SAMPLE_SIZE]
 
@@ -437,25 +304,53 @@ def _start_analysis(all_paths: list[Path], known: set[str], test_mode: bool):
     manifest_path = RUNS_DIR / f"{ts}.json"
     manifest = {
         "run_id": ts,
-        "processed_files_hash": run_signature(all_paths, INPUT_DIR),
         "input_dir": str(INPUT_DIR),
         "status": "incomplete",
         "test_mode": test_mode,
+        "analysis_model": config.ANALYSIS_MODEL,
+        "edit_model": config.EDIT_MODEL,
+        "total_queued": len(paths),
         "images": [],
         "errors": [],
         "token_usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
     }
-    save_manifest(manifest, manifest_path)
+    _save_manifest(manifest, manifest_path)
     st.session_state.manifest_path = str(manifest_path)
     st.session_state.manifest = manifest
     st.session_state.analysis_paths = [str(p) for p in paths]
     st.session_state.analyzing = True
 
 
-# ── SCREEN: Analyzing ────────────────────────────────────────────────────────
+def _retry_failed(failed_paths: list[Path]):
+    manifest = st.session_state.get("manifest")
+    manifest_path = st.session_state.get("manifest_path")
+    if not manifest or not manifest_path:
+        return
+
+    old_error_strs = {str(p) for p in failed_paths}
+    manifest["errors"] = [
+        e for e in manifest.get("errors", [])
+        if e.get("path") not in old_error_strs
+    ]
+
+    try:
+        results, errors, usage = asyncio.run(analyze_batch(failed_paths))
+        manifest["images"].extend(results)
+        manifest["errors"].extend(errors)
+        for k in ("prompt_tokens", "completion_tokens", "total_tokens"):
+            manifest["token_usage"][k] += usage.get(k, 0)
+        manifest["total_analyzed"] = len(manifest["images"])
+        manifest["total_errors"] = len(manifest["errors"])
+        _save_manifest(manifest, Path(manifest_path))
+        st.session_state.images = list(manifest["images"])
+    except Exception as e:
+        st.error(f"Retry failed: {e}")
+
+
+# ── SCREEN: Analyzing ─────────────────────────────────────────────────────────
 
 def _screen_analyzing():
-    st.title("Analyzing…")
+    st.title("Analyzing...")
 
     manifest = st.session_state.manifest
     manifest_path = Path(st.session_state.manifest_path)
@@ -463,9 +358,8 @@ def _screen_analyzing():
 
     if not paths:
         manifest["status"] = "complete"
-        save_manifest(manifest, manifest_path)
+        _save_manifest(manifest, manifest_path)
         st.session_state.images = list(manifest.get("images", []))
-        flag_duplicates(st.session_state.images)
         st.session_state.analyzing = False
         st.session_state.has_results = True
         st.rerun()
@@ -473,295 +367,553 @@ def _screen_analyzing():
 
     total = len(paths)
     batch_size = min(config.BATCH_SIZE, total)
-    batches = [paths[i:i + batch_size] for i in range(0, total, batch_size)]
-    already_done = len(manifest.get("images", []))
+
+    st.write(f"Processing **{total}** images in batches of {batch_size} "
+             f"using **{config.ANALYSIS_MODEL}**.")
 
     progress_bar = st.progress(0.0)
-    status_area = st.empty()
-    cost_area = st.empty()
-    file_area = st.empty()
+    status_text = st.empty()
+    cost_text = st.empty()
 
-    global_done = 0
-    for batch_num, batch in enumerate(batches, 1):
-        batch_files = ", ".join(p.name for p in batch[:3])
-        if len(batch) > 3:
-            batch_files += f" … and {len(batch) - 3} more"
-        status_area.markdown(f"Processing batch {batch_num}/{len(batches)} ({len(batch)} images)")
-        file_area.caption(f"Current: {batch_files}")
+    remaining_paths = list(paths)
+    max_retry_rounds = 3
 
-        try:
-            results, errors, usage = asyncio.run(analyze_batch(batch))
-        except Exception as e:
-            st.error(f"Analysis failed: {e}")
-            save_manifest(manifest, manifest_path)
-            st.caption("Progress has been saved. You can resume from where it left off.")
-            c1, c2 = st.columns(2)
-            with c1:
-                if st.button("Try again", type="primary"):
-                    st.session_state.analyzing = True
-                    done_hashes = {img["file_hash"] for img in manifest.get("images", []) if img.get("file_hash")}
-                    remaining = [p for p in paths if file_hash(p) not in done_hashes]
-                    st.session_state.analysis_paths = [str(p) for p in remaining]
+    for retry_round in range(max_retry_rounds + 1):
+        if not remaining_paths:
+            break
+
+        if retry_round > 0:
+            status_text.info(
+                f"Retrying {len(remaining_paths)} failed file(s) "
+                f"(attempt {retry_round} of {max_retry_rounds})..."
+            )
+
+        batches = [remaining_paths[i:i + batch_size]
+                    for i in range(0, len(remaining_paths), batch_size)]
+        round_errors = []
+
+        for batch_num, batch in enumerate(batches, 1):
+            names = ", ".join(p.name for p in batch[:3])
+            if len(batch) > 3:
+                names += f" +{len(batch) - 3} more"
+            status_text.write(f"Batch {batch_num}/{len(batches)} — {names}")
+
+            try:
+                results, errors, usage = asyncio.run(analyze_batch(batch))
+            except Exception as e:
+                st.error(f"Batch failed: {e}")
+                _save_manifest(manifest, manifest_path)
+                if st.button("Retry", type="primary"):
                     st.rerun()
-            with c2:
-                if st.button("Back to start"):
-                    go_to("dashboard")
-                    st.rerun()
-            return
+                return
 
-        manifest["images"].extend(results)
-        manifest["errors"].extend(errors)
-        for k in ("prompt_tokens", "completion_tokens", "total_tokens"):
-            manifest["token_usage"][k] += usage.get(k, 0)
-        save_manifest(manifest, manifest_path)
+            manifest["images"].extend(results)
+            for k in ("prompt_tokens", "completion_tokens", "total_tokens"):
+                manifest["token_usage"][k] += usage.get(k, 0)
+            round_errors.extend(errors)
+            _save_manifest(manifest, manifest_path)
 
-        global_done += len(batch)
-        pct = global_done / total
-        progress_bar.progress(pct, text=f"{already_done + global_done} of {already_done + total} images")
-        cost = estimate_cost(manifest["token_usage"])
-        cost_area.markdown(f"Cost: **${cost:.4f}** · Tokens: {manifest['token_usage']['total_tokens']:,} · Model: `{config.MODEL}`")
+            n_done = len(manifest["images"])
+            pct = min(n_done / total, 1.0)
+            progress_bar.progress(pct, text=f"{n_done} / {total} images")
+            cost = estimate_analysis_cost(manifest["token_usage"])
+            cost_text.caption(
+                f"Cost so far: ${cost:.4f} · "
+                f"{manifest['token_usage']['total_tokens']:,} tokens"
+            )
 
-    # Done
+        remaining_paths = [
+            Path(e["path"]) for e in round_errors
+            if e.get("path") and e["path"] != "?" and Path(e["path"]).exists()
+        ]
+        if not remaining_paths:
+            break
+
+    # Record any final errors
+    if remaining_paths:
+        for p in remaining_paths:
+            manifest["errors"].append({
+                "path": str(p), "filename": p.name,
+                "error": "Failed after all retry rounds",
+            })
+
+    # Completeness check — catch files that fell through the cracks
+    analyzed_set = {img["original_path"] for img in manifest["images"]}
+    error_set = {e["path"] for e in manifest.get("errors", []) if e.get("path")}
+    missed = {str(p) for p in paths} - analyzed_set - error_set
+
+    if missed:
+        missed_paths = [Path(p) for p in missed if Path(p).exists()]
+        if missed_paths:
+            status_text.write(f"Picking up {len(missed_paths)} missed file(s)...")
+            try:
+                results, errors, usage = asyncio.run(analyze_batch(missed_paths))
+                manifest["images"].extend(results)
+                manifest["errors"].extend(errors)
+                for k in ("prompt_tokens", "completion_tokens", "total_tokens"):
+                    manifest["token_usage"][k] += usage.get(k, 0)
+            except Exception:
+                for p in missed_paths:
+                    manifest["errors"].append({
+                        "path": str(p), "filename": p.name,
+                        "error": "Failed during final completeness retry",
+                    })
+
+    # Finalize
+    n_imgs = len(manifest["images"])
+    n_errs = len(manifest.get("errors", []))
+    manifest["total_analyzed"] = n_imgs
+    manifest["total_errors"] = n_errs
+    manifest["total_queued"] = total
     manifest["status"] = "complete"
-    save_manifest(manifest, manifest_path)
-    st.session_state.images = list(manifest.get("images", []))
-    flag_duplicates(st.session_state.images)
+    _save_manifest(manifest, manifest_path)
+
+    st.session_state.images = list(manifest["images"])
     st.session_state.analyzing = False
     st.session_state.has_results = True
 
-    progress_bar.progress(1.0, text="Complete!")
-    tok = manifest["token_usage"]
-    cost = estimate_cost(tok)
-    n_imgs = len(manifest["images"])
-    n_errs = len(manifest["errors"])
-    status_area.success(f"Finished — {n_imgs} images analyzed, {n_errs} error(s)")
-    cost_area.markdown(f"**Total cost: ${cost:.4f}** · {tok['total_tokens']:,} tokens")
-    file_area.empty()
+    progress_bar.progress(1.0, text="Done!")
 
-    if st.button("View results →", type="primary", use_container_width=True):
+    needs_edit = sum(1 for img in manifest["images"] if img.get("recommendations"))
+    cost = estimate_analysis_cost(manifest["token_usage"])
+
+    if n_errs > 0:
+        st.warning(f"Done — {n_imgs} analyzed, {n_errs} error(s), {needs_edit} need edits. Cost: ${cost:.4f}")
+    else:
+        st.success(f"Done — {n_imgs}/{total} analyzed, {needs_edit} need edits. Cost: ${cost:.4f}")
+
+    status_text.empty()
+    cost_text.empty()
+
+    if st.button("Review Results →", type="primary", use_container_width=True):
         st.rerun()
 
 
-# ── SCREEN: Results ──────────────────────────────────────────────────────────
+# ── SCREEN: Review ────────────────────────────────────────────────────────────
 
-def _screen_results():
+def _screen_review():
     images = st.session_state.get("images", [])
     manifest = st.session_state.get("manifest") or {}
 
     if not images:
-        st.info("No results to show.")
-        if st.button("Back to start"):
-            go_to("dashboard")
+        st.info("No results yet. Run an analysis first.")
+        if st.button("Back to Dashboard"):
+            _go_to("dashboard")
             st.rerun()
         return
 
-    n = len(images)
-    tok = manifest.get("token_usage", {})
-    cost = estimate_cost(tok)
-    n_errs = len(manifest.get("errors", []))
-    approved_n = sum(1 for r in images if r.get("approved"))
+    st.title("Review Results")
 
-    folder_counts = Counter(
-        (r.get("user_folder") or r.get("suggested_folder") or "unknown").strip() for r in images
-    )
-
-    # Title + test mode warning
-    st.title("Results")
     if manifest.get("test_mode"):
-        st.warning("This was a **test run** — only a sample of your images were analyzed. Go back and run the full analysis when ready.")
+        st.warning("This was a **test run** — only a sample was analyzed. "
+                    "Go back to the dashboard to run the full analysis when ready.")
 
-    # Summary metrics
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Analyzed", n)
-    c2.metric("Receipts to keep", folder_counts.get("receipts_keep", 0))
-    c3.metric("API cost", f"${cost:.4f}")
-    c4.metric("Errors", n_errs)
+    # Completeness warning
+    total_queued = manifest.get("total_queued", 0)
+    n_errs = len(manifest.get("errors", []))
+    if total_queued > 0 and len(images) + n_errs < total_queued:
+        gap = total_queued - len(images) - n_errs
+        st.error(f"**{gap} file(s)** were not processed. Consider re-running analysis.")
 
-    with st.expander("Category breakdown"):
-        for b in BUCKETS:
-            cnt = folder_counts.get(b, 0)
-            if cnt:
-                st.markdown(f"**{b}**: {cnt}")
+    # Summary
+    n = len(images)
+    needs_rotation = sum(1 for img in images
+                         for r in img.get("recommendations", []) if r["type"] == "rotation")
+    needs_upscale = sum(1 for img in images
+                        for r in img.get("recommendations", []) if r["type"] == "upscale")
+    needs_filter = sum(1 for img in images
+                       for r in img.get("recommendations", []) if r["type"] == "filter")
+    needs_any = sum(1 for img in images if img.get("recommendations"))
+    no_edits = n - needs_any
 
-    if n_errs:
-        with st.expander(f"Errors ({n_errs})"):
+    tok = manifest.get("token_usage", {})
+    analysis_cost = estimate_analysis_cost(tok)
+
+    c1, c2, c3, c4, c5 = st.columns(5)
+    c1.metric("Total", n)
+    c2.metric("Rotation", needs_rotation)
+    c3.metric("Upscale", needs_upscale)
+    c4.metric("Filters", needs_filter)
+    c5.metric("OK as-is", no_edits)
+
+    st.divider()
+
+    # Tabs
+    tab_all, tab_rotation, tab_upscale, tab_filter, tab_ok = st.tabs([
+        f"All ({n})",
+        f"🔄 Rotation ({needs_rotation})",
+        f"📐 Upscale ({needs_upscale})",
+        f"✨ Filters ({needs_filter})",
+        f"✅ No Edits ({no_edits})",
+    ])
+
+    with tab_all:
+        _render_grid(images, "all")
+    with tab_rotation:
+        _render_grid(
+            [img for img in images
+             if any(r["type"] == "rotation" for r in img.get("recommendations", []))],
+            "rotation",
+        )
+    with tab_upscale:
+        _render_grid(
+            [img for img in images
+             if any(r["type"] == "upscale" for r in img.get("recommendations", []))],
+            "upscale",
+        )
+    with tab_filter:
+        _render_grid(
+            [img for img in images
+             if any(r["type"] == "filter" for r in img.get("recommendations", []))],
+            "filter",
+        )
+    with tab_ok:
+        _render_grid(
+            [img for img in images if not img.get("recommendations")],
+            "ok",
+        )
+
+    # Errors
+    if n_errs > 0:
+        st.divider()
+        with st.expander(f"⚠️ {n_errs} error(s)"):
             for e in manifest.get("errors", []):
                 st.text(f"{e.get('filename', e.get('path', '?'))}: {e.get('error', '?')}")
+            retryable = [
+                Path(e["path"]) for e in manifest.get("errors", [])
+                if e.get("path") and e["path"] != "?" and Path(e["path"]).exists()
+            ]
+            if retryable:
+                if st.button(f"Retry {len(retryable)} failed file(s)", type="primary"):
+                    _retry_failed(retryable)
+                    st.rerun()
 
     st.divider()
-    st.markdown("Review the table. Edit anything that looks wrong. Check **Approved** for images you want to move and rename.")
 
-    # Build table rows
-    rows = []
-    for i, r in enumerate(images):
-        rows.append({
-            "Filename": r.get("filename", ""),
-            "Description": r.get("description") or "",
-            "Vendor": r.get("vendor") or "",
-            "Price": str(r.get("total") or ""),
-            "Date": r.get("date") or "",
-            "Category": r.get("category") or "unknown",
-            "Destination": (r.get("user_folder") or r.get("suggested_folder") or "unknown").strip(),
-            "New Filename": preview_new_name(r),
-            "Confidence": r.get("confidence") or "low",
-            "Approved": bool(r.get("approved")),
-            "_idx": i,
-        })
-
-    df = pd.DataFrame(rows)
-
-    edited = st.data_editor(
-        df[["Filename", "Description", "Vendor", "Price", "Date", "Category", "Destination", "New Filename", "Confidence", "Approved"]],
-        column_config={
-            "Filename": st.column_config.TextColumn("Filename", width="medium", disabled=True),
-            "Description": st.column_config.TextColumn("Description", width="large", disabled=True),
-            "Vendor": st.column_config.TextColumn("Vendor", width="small"),
-            "Price": st.column_config.TextColumn("Price", width="small", disabled=True),
-            "Date": st.column_config.TextColumn("Date", width="small"),
-            "Category": st.column_config.SelectboxColumn("Category", options=["receipt", "invoice", "document", "photo", "screenshot", "unknown"], width="small"),
-            "Destination": st.column_config.SelectboxColumn("Destination", options=BUCKETS, width="medium"),
-            "New Filename": st.column_config.TextColumn("New Filename", width="medium", disabled=True),
-            "Confidence": st.column_config.TextColumn("Confidence", width="small", disabled=True),
-            "Approved": st.column_config.CheckboxColumn("Approved", width="small"),
-        },
-        key="results_editor",
-        num_rows="fixed",
-        use_container_width=True,
-    )
-
-    # Write edits back + auto-save
-    for i in range(len(edited)):
-        row = edited.iloc[i]
-        idx = rows[i]["_idx"]
-        images[idx]["category"] = str(row["Category"]) if pd.notna(row["Category"]) else "unknown"
-        images[idx]["user_folder"] = str(row["Destination"]) if pd.notna(row["Destination"]) else None
-        images[idx]["approved"] = bool(row["Approved"])
-        if pd.notna(row["Vendor"]) and str(row["Vendor"]).strip():
-            images[idx]["vendor"] = str(row["Vendor"])
-        if pd.notna(row["Date"]) and str(row["Date"]).strip():
-            images[idx]["date"] = str(row["Date"])
-    auto_save()
-
-    # Image preview
-    with st.expander("Preview an image"):
-        filenames = [r.get("filename", "") for r in images]
-        sel = st.selectbox("Choose image", filenames, key="preview_sel")
-        if sel:
-            img_data = next((r for r in images if r.get("filename") == sel), None)
-            if img_data:
-                p = Path(img_data["original_path"])
-                if not p.is_absolute():
-                    p = INPUT_DIR / p
-                left, right = st.columns([2, 1])
-                with left:
-                    if p.exists():
-                        try:
-                            from PIL import Image as PILImage
-                            st.image(PILImage.open(p), caption=sel, use_container_width=True)
-                        except Exception:
-                            st.error(f"Cannot load: {p}")
-                    else:
-                        st.error(f"File not found: {p}")
-                with right:
-                    for k in ("description", "vendor", "total", "date", "category", "confidence", "suggested_folder", "notes"):
-                        v = img_data.get(k)
-                        if v is not None and v != "":
-                            st.markdown(f"**{k.replace('_', ' ').title()}:** {v}")
-
-    # Actions
-    st.divider()
-    approved_n = sum(1 for r in images if r.get("approved"))
-
-    col1, col2 = st.columns(2)
+    # Batch actions
+    st.subheader("Bulk Actions")
+    col1, col2, col3, col4 = st.columns(4)
     with col1:
-        if st.button("Approve all", use_container_width=True):
-            for r in images:
-                r["approved"] = True
-            auto_save()
+        if st.button("✅ Approve all edits", use_container_width=True):
+            for img in images:
+                img["approved_edits"] = [r["type"] for r in img.get("recommendations", [])]
+            _auto_save()
             st.rerun()
     with col2:
-        if st.button("Reset all approvals", use_container_width=True):
-            for r in images:
-                r["approved"] = False
-            auto_save()
+        if st.button("🔄 Approve rotations only", use_container_width=True):
+            for img in images:
+                approved = set(img.get("approved_edits", []))
+                for r in img.get("recommendations", []):
+                    if r["type"] == "rotation":
+                        approved.add("rotation")
+                img["approved_edits"] = list(approved)
+            _auto_save()
+            st.rerun()
+    with col3:
+        if st.button("🆓 Approve free edits only", use_container_width=True):
+            for img in images:
+                approved = set(img.get("approved_edits", []))
+                for r in img.get("recommendations", []):
+                    if r.get("estimated_cost", 0) == 0:
+                        approved.add(r["type"])
+                img["approved_edits"] = list(approved)
+            _auto_save()
+            st.rerun()
+    with col4:
+        if st.button("❌ Clear all approvals", use_container_width=True):
+            for img in images:
+                img["approved_edits"] = []
+            _auto_save()
             st.rerun()
 
-    st.divider()
-    st.markdown(f"**{approved_n}** of {n} images approved")
+    # Cost summary + apply
+    n_approved = sum(1 for img in images if img.get("approved_edits"))
+    total_cost = estimate_total_edit_cost(images)
 
-    if approved_n == 0:
-        st.button("Move & Rename →", type="primary", disabled=True, use_container_width=True)
-        st.caption("Check the **Approved** box on at least one image to continue.")
+    st.divider()
+    st.subheader("Apply Edits")
+
+    if n_approved == 0:
+        st.info("Approve at least one edit above to continue.")
     else:
-        if st.button(f"Move & Rename {approved_n} images →", type="primary", use_container_width=True):
-            auto_save()
-            st.session_state.confirm_pending = True
+        free_count = sum(
+            1 for img in images
+            for r in img.get("recommendations", [])
+            if r["type"] in img.get("approved_edits", []) and r.get("estimated_cost", 0) == 0
+        )
+        paid_count = sum(
+            1 for img in images
+            for r in img.get("recommendations", [])
+            if r["type"] in img.get("approved_edits", []) and r.get("estimated_cost", 0) > 0
+        )
+
+        st.write(
+            f"**{n_approved} image(s)** with approved edits. "
+            f"{free_count} free edit(s), {paid_count} paid edit(s). "
+            f"**Estimated cost: ${total_cost:.2f}**"
+        )
+
+        if total_cost > 0:
+            st.caption(f"Analysis cost was ${analysis_cost:.4f}. "
+                       f"Edit cost will be ~${total_cost:.2f} on top of that.")
+
+        if st.button(
+            f"Apply {n_approved} edit(s) →" + (f" (${total_cost:.2f})" if total_cost > 0 else " (free)"),
+            type="primary",
+            use_container_width=True,
+        ):
+            _auto_save()
+            st.session_state.processing = True
             st.rerun()
 
 
-# ── SCREEN: Confirm ──────────────────────────────────────────────────────────
+def _render_grid(images: list[dict], tab_key: str):
+    if not images:
+        st.caption("No images in this category.")
+        return
 
-def _screen_confirm():
+    page_key = f"page_{tab_key}"
+    page = st.session_state.get(page_key, 0)
+    total_pages = max(1, -(-len(images) // IMAGES_PER_PAGE))
+    page = min(page, total_pages - 1)
+
+    start = page * IMAGES_PER_PAGE
+    page_images = images[start:start + IMAGES_PER_PAGE]
+
+    if total_pages > 1:
+        pcol1, pcol2, pcol3 = st.columns([1, 2, 1])
+        with pcol1:
+            if st.button("← Prev", key=f"prev_{tab_key}", disabled=page == 0):
+                st.session_state[page_key] = page - 1
+                st.rerun()
+        with pcol2:
+            st.caption(f"Page {page + 1} of {total_pages} · {len(images)} images")
+        with pcol3:
+            if st.button("Next →", key=f"next_{tab_key}", disabled=page >= total_pages - 1):
+                st.session_state[page_key] = page + 1
+                st.rerun()
+
+    for row_start in range(0, len(page_images), GRID_COLS):
+        row = page_images[row_start:row_start + GRID_COLS]
+        cols = st.columns(GRID_COLS)
+        for i, img_data in enumerate(row):
+            with cols[i]:
+                _render_card(img_data)
+
+
+def _render_card(img_data: dict):
+    recs = img_data.get("recommendations", [])
+    approved = set(img_data.get("approved_edits", []))
+    filename = img_data.get("filename", "?")
+    desc = img_data.get("description") or ""
+    quality = img_data.get("quality", "unknown")
+    meta = img_data.get("metadata", {})
+
+    # Thumbnail
+    p = Path(img_data.get("original_path", ""))
+    if p.exists():
+        try:
+            from PIL import Image as PILImage
+            thumb = PILImage.open(p)
+            thumb.thumbnail((256, 256))
+            st.image(thumb, use_container_width=True)
+        except Exception:
+            st.caption(f"[{filename}]")
+    else:
+        st.caption(f"[{filename}]")
+
+    # Filename
+    st.caption(filename[:30] + ("..." if len(filename) > 30 else ""))
+
+    # Resolution + quality
+    if meta.get("width"):
+        st.caption(f"{meta['width']}×{meta['height']} · {quality}")
+
+    # Recommendations as checkboxes
+    if recs:
+        all_images = st.session_state.get("images", [])
+        try:
+            idx = next(
+                i for i, img in enumerate(all_images)
+                if img.get("original_path") == img_data.get("original_path")
+            )
+        except StopIteration:
+            idx = id(img_data)
+
+        changed = False
+        for rec in recs:
+            icon = config.EDIT_TYPES.get(rec["type"], {}).get("icon", "")
+            cost_str = "" if rec.get("estimated_cost", 0) == 0 else f" (${rec['estimated_cost']:.2f})"
+            key = f"chk_{idx}_{rec['type']}"
+            checked = st.checkbox(
+                f"{icon} {rec['label']}{cost_str}",
+                value=rec["type"] in approved,
+                key=key,
+            )
+            if checked and rec["type"] not in approved:
+                approved.add(rec["type"])
+                changed = True
+            elif not checked and rec["type"] in approved:
+                approved.discard(rec["type"])
+                changed = True
+
+        if changed:
+            img_data["approved_edits"] = list(approved)
+            _auto_save()
+
+    # Detail expander
+    with st.expander("Details"):
+        if desc:
+            st.write(desc)
+
+        analysis = img_data.get("analysis", {})
+
+        orientation = analysis.get("orientation", {})
+        if not orientation.get("is_correct", True):
+            st.write(f"**Orientation:** Needs {orientation.get('rotation_needed_degrees', 0)}° rotation")
+        else:
+            st.write("**Orientation:** Correct")
+
+        filters = analysis.get("filters", {})
+        if filters.get("assessment"):
+            st.write(f"**Quality:** {filters.get('overall_quality', '?')} — {filters['assessment']}")
+
+        if filters.get("suggestions"):
+            for s in filters["suggestions"]:
+                st.caption(f"• {s.get('type', 'edit')}: {s.get('description', '')}")
+
+
+# ── SCREEN: Processing ────────────────────────────────────────────────────────
+
+def _screen_processing():
+    st.title("Applying Edits...")
+
     images = st.session_state.get("images", [])
+    to_process = [img for img in images if img.get("approved_edits")]
+
+    if not to_process:
+        st.info("No edits to apply.")
+        st.session_state.processing = False
+        st.rerun()
+        return
+
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+    total = len(to_process)
+    st.write(f"Applying approved edits to **{total}** image(s). "
+             f"Output goes to `{config.OUTPUT_DIR}`.")
+
+    progress_bar = st.progress(0.0)
+    status_text = st.empty()
+    cost_text = st.empty()
+
+    edit_results = []
+    total_cost = 0.0
+
+    for i, img_data in enumerate(to_process):
+        edits = ", ".join(img_data["approved_edits"])
+        status_text.write(f"{i + 1}/{total} — {img_data['filename']} ({edits})")
+        progress_bar.progress((i + 1) / total, text=f"{i + 1} / {total}")
+
+        try:
+            result = apply_edits(img_data, OUTPUT_DIR)
+            edit_results.append(result)
+            for edit in result.get("edits_applied", []):
+                total_cost += edit.get("cost", 0)
+            cost_text.caption(f"Edit cost so far: ${total_cost:.2f}")
+        except Exception as e:
+            edit_results.append({
+                "filename": img_data["filename"],
+                "original_path": img_data.get("original_path", ""),
+                "errors": [{"type": "general", "error": str(e)}],
+                "edits_applied": [],
+                "output_path": None,
+            })
+
+    progress_bar.progress(1.0, text="Done!")
+    status_text.success(f"Applied edits to {total} image(s).")
+
     manifest = st.session_state.get("manifest") or {}
-    approved_n = sum(1 for r in images if r.get("approved"))
+    run_id = manifest.get("run_id", "unknown")
+    results_path = RUNS_DIR / f"{run_id}_edit_results.json"
+    with open(results_path, "w", encoding="utf-8") as f:
+        json.dump(edit_results, f, indent=2)
 
-    st.title("Confirm")
-    st.warning(f"This will move **{approved_n}** files into **`{config.OUTPUT_DIR}`**. "
-               f"Receipts in **receipts_keep** will be renamed. This cannot be undone.")
+    st.session_state.edit_results = edit_results
+    st.session_state.processing = False
 
-    folder_counts = Counter()
-    for r in images:
-        if r.get("approved"):
-            f = (r.get("user_folder") or r.get("suggested_folder") or "unknown").strip()
-            folder_counts[f] += 1
-    for b in BUCKETS:
-        if folder_counts.get(b):
-            st.markdown(f"• **{b}**: {folder_counts[b]} files")
+    if st.button("View Results →", type="primary", use_container_width=True):
+        st.rerun()
+
+
+# ── SCREEN: Complete ──────────────────────────────────────────────────────────
+
+def _screen_complete():
+    edit_results = st.session_state.get("edit_results", [])
+
+    st.title("Complete")
+
+    total_edits = sum(len(r.get("edits_applied", [])) for r in edit_results)
+    total_errors = sum(len(r.get("errors", [])) for r in edit_results)
+    total_cost = sum(
+        e.get("cost", 0) for r in edit_results for e in r.get("edits_applied", [])
+    )
+    images_with_output = sum(1 for r in edit_results if r.get("output_path"))
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Images Edited", images_with_output)
+    c2.metric("Edits Applied", total_edits)
+    c3.metric("Errors", total_errors)
+    c4.metric("Edit Cost", f"${total_cost:.2f}")
+
+    st.success(f"Edited images saved to `{config.OUTPUT_DIR}`.")
+
+    st.divider()
+    st.subheader("Per-Image Results")
+
+    for result in edit_results:
+        fname = result.get("filename", "unknown")
+        edits = result.get("edits_applied", [])
+        errors = result.get("errors", [])
+        output = result.get("output_path")
+
+        icon = "✅" if output and not errors else "⚠️" if errors else "—"
+        with st.expander(f"{icon} {fname} — {len(edits)} edit(s)"):
+            if output and Path(output).exists():
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.caption("Original")
+                    orig = Path(result.get("original_path", ""))
+                    if orig.exists():
+                        try:
+                            from PIL import Image as PILImage
+                            st.image(PILImage.open(orig), use_container_width=True)
+                        except Exception:
+                            st.caption("Could not load")
+                with col2:
+                    st.caption("Edited")
+                    try:
+                        from PIL import Image as PILImage
+                        st.image(PILImage.open(output), use_container_width=True)
+                    except Exception:
+                        st.caption("Could not load")
+
+            for edit in edits:
+                st.write(f"• **{edit['type'].title()}** — ${edit.get('cost', 0):.2f}")
+
+            for err in errors:
+                st.error(f"{err.get('type', 'error')}: {err.get('error', 'unknown')}")
 
     st.divider()
     c1, c2 = st.columns(2)
     with c1:
-        if st.button("Yes, move & rename now", type="primary", use_container_width=True):
-            m = dict(manifest)
-            m["images"] = images
-            result = execute(m, OUTPUT_DIR, RUNS_DIR)
-            st.session_state.sort_result = result
-            st.session_state.confirm_pending = False
-            st.rerun()
-    with c2:
-        if st.button("← Go back to results", use_container_width=True):
-            st.session_state.confirm_pending = False
-            st.rerun()
-
-
-# ── SCREEN: Done ─────────────────────────────────────────────────────────────
-
-def _screen_done():
-    result = st.session_state.sort_result
-
-    st.title("Done!")
-    st.success(f"**{result['moved']}** files moved to `{config.OUTPUT_DIR}`")
-
-    for folder, cnt in result.get("per_folder", {}).items():
-        if cnt:
-            st.markdown(f"• **{folder}**: {cnt} files")
-
-    if result.get("errors"):
-        st.error(f"{len(result['errors'])} file(s) could not be moved:")
-        for e in result["errors"]:
-            st.text(e)
-
-    st.divider()
-    c1, c2 = st.columns(2)
-    with c1:
-        if st.button("Start over", use_container_width=True):
+        if st.button("Start New Project", use_container_width=True):
             for k in list(st.session_state.keys()):
                 del st.session_state[k]
             st.rerun()
     with c2:
-        if st.button("← Back to results", use_container_width=True):
-            st.session_state.pop("sort_result", None)
+        if st.button("← Back to Review", use_container_width=True):
+            st.session_state.pop("edit_results", None)
             st.rerun()
 
 

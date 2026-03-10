@@ -1,6 +1,7 @@
 """
-Receipt Sorter — Move approved images into bucket folders under processed/.
-ALL files get renamed: short-description-date.ext (+ price if it's a receipt).
+ImageStudio — File sorter (optional).
+Moves approved images into bucket folders under processed/.
+Not currently used by the main app — kept for potential future use.
 """
 import json
 import re
@@ -8,22 +9,17 @@ import shutil
 from datetime import datetime
 from pathlib import Path
 
-import config
+
+DEFAULT_BUCKETS = ["keep", "maybe", "skip", "unknown"]
 
 
 def generate_filename(row: dict, suffix: str) -> str:
-    """
-    Build a clean renamed filename for any image.
-    Format: short-description-date.ext  (+ price for receipts)
-    All lowercase, hyphens, no spaces.
-    """
     description = row.get("description")
     vendor = row.get("vendor")
     total = row.get("total")
     date = row.get("date")
     category = (row.get("category") or "").lower()
 
-    # Short name: prefer vendor (2 words max), else first 2-3 words of description
     if vendor:
         words = re.findall(r"[a-zA-Z0-9]+", vendor)
         name = "-".join(words[:2])
@@ -38,7 +34,6 @@ def generate_filename(row: dict, suffix: str) -> str:
         name = "file"
 
     parts = [name]
-
     if date:
         parts.append(date)
 
@@ -55,14 +50,11 @@ def execute(
     manifest_path_or_data: str | Path | dict,
     output_dir: str | Path,
     runs_dir: str | Path,
+    buckets: list[str] | None = None,
 ) -> dict:
-    """
-    Move approved rows into bucket subfolders under output_dir.
-    All files are renamed via generate_filename.
-    Returns a summary dict.
-    """
     output_dir = Path(output_dir).resolve()
     runs_dir = Path(runs_dir).resolve()
+    buckets = buckets or DEFAULT_BUCKETS
 
     if isinstance(manifest_path_or_data, dict):
         manifest = manifest_path_or_data
@@ -78,16 +70,16 @@ def execute(
     if not approved:
         return {"moved": 0, "per_folder": {}, "errors": [], "sorted_manifest_path": None}
 
-    for bucket in config.BUCKETS:
+    for bucket in buckets:
         (output_dir / bucket).mkdir(parents=True, exist_ok=True)
 
-    per_folder: dict[str, int] = {b: 0 for b in config.BUCKETS}
+    per_folder: dict[str, int] = {b: 0 for b in buckets}
     errors: list[str] = []
-    used_names: dict[str, set[str]] = {b: set() for b in config.BUCKETS}
+    used_names: dict[str, set[str]] = {b: set() for b in buckets}
 
     for row in approved:
         folder = (row.get("user_folder") or row.get("suggested_folder") or "unknown").strip()
-        if folder not in config.BUCKETS:
+        if folder not in buckets:
             folder = "unknown"
         src = Path(row["original_path"])
         if not src.exists():
