@@ -3,4 +3,3 @@ Pillow
 pillow-heif
 python-dotenv
 streamlit
-pandas

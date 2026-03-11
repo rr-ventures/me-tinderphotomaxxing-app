@@ -9,11 +9,9 @@ RUNS_DIR = "./runs"
 
 # ── Models ────────────────────────────────────────────────────────────────────
 
-# Best Gemini model for photo understanding/analysis
 ANALYSIS_MODEL = "gemini-2.5-pro"
 ANALYSIS_CONCURRENCY = 5
 
-# Nano Banana Pro — highest quality image editing & generation
 EDIT_MODEL = "gemini-3-pro-image-preview"
 
 # ── Image analysis settings ───────────────────────────────────────────────────
@@ -21,6 +19,11 @@ EDIT_MODEL = "gemini-3-pro-image-preview"
 MAX_ANALYSIS_SIZE_PX = 1024
 BATCH_SIZE = 20
 TEST_SAMPLE_SIZE = 10
+
+# How many images to process per user-selected batch (adjustable in UI)
+DEFAULT_PROCESS_BATCH_SIZE = 50
+MIN_PROCESS_BATCH_SIZE = 5
+MAX_PROCESS_BATCH_SIZE = 500
 
 # ── Resolution thresholds ────────────────────────────────────────────────────
 
@@ -65,9 +68,9 @@ EDIT_TYPES = {
         "model": "gemini-3-pro-image-preview",
     },
     "filter": {
-        "label": "Filter Enhancement",
+        "label": "Filter Recommendation",
         "icon": "✨",
-        "method": "api",
-        "model": "gemini-3-pro-image-preview",
+        "method": "recommendation_only",
+        "cost": 0.0,
     },
 }

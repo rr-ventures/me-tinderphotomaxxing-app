@@ -1,7 +1,6 @@
 """
 ImageStudio — AI-powered photo analysis.
-Uses Gemini 2.5 Pro to analyze photos for orientation, quality, and editing suggestions.
-Builds per-image recommendations with cost estimates.
+Uses Gemini to analyze photos for orientation, quality, and editing suggestions.
 """
 import asyncio
 import hashlib
@@ -22,8 +21,13 @@ import config
 
 load_dotenv()
 
+# Register HEIC support once at import time
+try:
+    import pillow_heif
+    pillow_heif.register_heif_opener()
+except ImportError:
+    pass
 
-# ── Utilities ─────────────────────────────────────────────────────────────────
 
 def file_hash(path: Path) -> str:
     h = hashlib.sha256()
@@ -34,13 +38,15 @@ def file_hash(path: Path) -> str:
 
 
 def scan_image_paths(input_dir: Path) -> list[Path]:
-    paths = []
-    for ext in config.SUPPORTED_EXTENSIONS:
-        paths.extend(input_dir.rglob(f"*{ext}"))
-        paths.extend(input_dir.rglob(f"*{ext.upper()}"))
-    seen = set()
-    unique = []
-    for p in sorted(paths, key=lambda p: str(p).lower()):
+    """Single-pass scan that catches all case variations (.jpg, .JPG, .Jpg, etc.)."""
+    exts = {e.lower() for e in config.SUPPORTED_EXTENSIONS}
+    paths = [
+        p for p in input_dir.rglob("*")
+        if p.is_file() and p.suffix.lower() in exts
+    ]
+    seen: set[Path] = set()
+    unique: list[Path] = []
+    for p in sorted(paths, key=lambda x: str(x).lower()):
         rp = p.resolve()
         if rp not in seen:
             seen.add(rp)
@@ -48,40 +54,29 @@ def scan_image_paths(input_dir: Path) -> list[Path]:
     return unique
 
 
-# ── Local metadata extraction (free) ─────────────────────────────────────────
-
 def get_image_metadata(path: Path) -> dict:
     try:
-        ext = path.suffix.lower()
-        if ext == ".heic":
+        img = Image.open(path)
+        try:
+            width, height = img.size
+            exif_rotation = 0
             try:
-                import pillow_heif
-                pillow_heif.register_heif_opener()
+                exif = img.getexif()
+                orientation = exif.get(ExifBase.Orientation, 1)
+                exif_rotation = {1: 0, 3: 180, 6: 90, 8: 270}.get(orientation, 0)
             except Exception:
                 pass
-        img = Image.open(path)
-        width, height = img.size
-
-        exif_rotation = 0
-        try:
-            exif = img.getexif()
-            orientation = exif.get(ExifBase.Orientation, 1)
-            exif_rotation_map = {1: 0, 3: 180, 6: 90, 8: 270}
-            exif_rotation = exif_rotation_map.get(orientation, 0)
-        except Exception:
-            pass
-
-        short_side = min(width, height)
-        needs_upscale = short_side < config.MIN_RESOLUTION_SHORT_SIDE
-
-        return {
-            "width": width,
-            "height": height,
-            "short_side": short_side,
-            "exif_rotation": exif_rotation,
-            "needs_upscale": needs_upscale,
-            "file_size_kb": round(path.stat().st_size / 1024, 1),
-        }
+            short_side = min(width, height)
+            return {
+                "width": width,
+                "height": height,
+                "short_side": short_side,
+                "exif_rotation": exif_rotation,
+                "needs_upscale": short_side < config.MIN_RESOLUTION_SHORT_SIDE,
+                "file_size_kb": round(path.stat().st_size / 1024, 1),
+            }
+        finally:
+            img.close()
     except Exception as e:
         return {
             "width": 0, "height": 0, "short_side": 0,
@@ -90,33 +85,25 @@ def get_image_metadata(path: Path) -> dict:
         }
 
 
-# ── Image preparation ────────────────────────────────────────────────────────
-
 def load_and_prepare_image(path: Path) -> tuple[bytes, str] | None:
     try:
-        ext = path.suffix.lower()
-        if ext == ".heic":
-            try:
-                import pillow_heif
-                pillow_heif.register_heif_opener()
-            except Exception:
-                pass
-        img = Image.open(path).convert("RGB")
-        w, h = img.size
-        if max(w, h) > config.MAX_ANALYSIS_SIZE_PX:
-            ratio = config.MAX_ANALYSIS_SIZE_PX / max(w, h)
-            new_size = (int(w * ratio), int(h * ratio))
-            img = img.resize(new_size, Image.Resampling.LANCZOS)
-        buf = io.BytesIO()
-        img.save(buf, format="JPEG", quality=85)
-        return buf.getvalue(), "image/jpeg"
+        img = Image.open(path)
+        try:
+            img = img.convert("RGB")
+            w, h = img.size
+            if max(w, h) > config.MAX_ANALYSIS_SIZE_PX:
+                ratio = config.MAX_ANALYSIS_SIZE_PX / max(w, h)
+                img = img.resize((int(w * ratio), int(h * ratio)), Image.Resampling.LANCZOS)
+            buf = io.BytesIO()
+            img.save(buf, format="JPEG", quality=85)
+            return buf.getvalue(), "image/jpeg"
+        finally:
+            img.close()
     except Exception:
         return None
 
 
-# ── AI Analysis Prompt ────────────────────────────────────────────────────────
-
-ANALYSIS_PROMPT = """You are a professional dating profile photo editor analyzing images for a client.
+ANALYSIS_PROMPT = """You are a professional photo editor analyzing profile photos for a client.
 
 The image resolution is {width}x{height} pixels.
 
@@ -128,32 +115,63 @@ Respond with ONLY a valid JSON object (no markdown fences, no extra text):
     "confidence": "high",
     "reason": null
   }},
-  "filters": {{
-    "needs_editing": false,
-    "suggestions": [],
-    "overall_quality": "good",
-    "assessment": "Brief quality assessment"
+  "scene": {{
+    "setting": "Brief description of the setting/location (e.g. pool resort, Chinese gardens, urban rooftop, beach sunset)",
+    "lighting": "Type of lighting (e.g. natural daylight, golden hour, overcast, indoor warm, studio, night/neon, mixed)",
+    "dominant_colors": ["list", "of", "dominant", "colors"],
+    "mood": "Overall mood/feel of the image",
+    "background_type": "What's behind the subject (e.g. greenery, water, architecture, sky, indoor, urban)"
   }},
-  "description": "One sentence describing this photo",
-  "is_good_for_dating_profile": true,
-  "profile_tips": null
-}}
-
-For filter suggestions, each item in the array should be:
-{{
-  "type": "color_correction|brightness|contrast|warmth|saturation|sharpening|background_blur|skin_smoothing|vignette|hdr|cinematic|portrait_lighting",
-  "description": "What to adjust and why",
-  "intensity": "subtle|moderate|strong",
-  "edit_prompt": "Exact instruction for an AI image editor"
+  "quality": {{
+    "overall": "excellent|good|fair|poor",
+    "assessment": "Brief quality assessment of exposure, white balance, sharpness",
+    "issues": ["list any issues like underexposed, overexposed, soft focus, color cast, etc."]
+  }},
+  "suggested_name": "A short descriptive name for this photo based on what's visible. Use format like: Pool Resort, Chinese Gardens, City Skyline, Beach Sunset, Rooftop View, Garden Portrait. Keep it 2-4 words, common sense, descriptive.",
+  "description": "One sentence describing this photo"
 }}
 
 CRITICAL GUIDELINES:
-- Only suggest rotation if the image is CLEARLY sideways or upside down. Most photos are correctly oriented.
-- Only suggest filters that would MEANINGFULLY improve the photo. Not every photo needs editing.
-- Be highly selective — like a real professional editor, only recommend changes that truly matter.
-- If the photo already looks great, say so with needs_editing: false and an empty suggestions array.
-- Filter edit_prompts must be specific, actionable instructions.
+- Only suggest rotation if the image is CLEARLY sideways or upside down.
 - rotation_needed_degrees must be exactly 0, 90, 180, or 270.
+- For suggested_name: be practical and descriptive. These are profile photos, so think about the setting/backdrop. Examples: Pool Resort, Chinese Gardens, Tower View, Urban Skyline, Beach Sunset, Garden Path, Restaurant Terrace, Hotel Lobby.
+- For scene analysis: be specific about colors, lighting type, and setting — this will be used to match appropriate photo filters.
+"""
+
+FILTER_MATCHING_PROMPT = """You are a photo filter expert. Based on the following image analysis and filter catalog, recommend the top 2 best filters for this profile photo.
+
+IMAGE ANALYSIS:
+- Setting: {setting}
+- Lighting: {lighting}
+- Dominant colors: {dominant_colors}
+- Mood: {mood}
+- Background: {background_type}
+- Quality: {quality} — {assessment}
+- Quality issues: {issues}
+- Description: {description}
+
+AVAILABLE FILTERS:
+{filter_catalog}
+
+Respond with ONLY a valid JSON object (no markdown fences, no extra text):
+{{
+  "recommendations": [
+    {{
+      "filter_id": "the filter id from the catalog",
+      "match_reason": "Why this filter is the best match for this specific photo — reference the scene, colors, and lighting"
+    }},
+    {{
+      "filter_id": "second best filter id",
+      "match_reason": "Why this is the second best match"
+    }}
+  ]
+}}
+
+GUIDELINES:
+- Pick filters whose best_for tags closely match the scene setting and lighting.
+- Consider the dominant colors and how the filter's color_profile would complement them.
+- Consider the quality issues — if the photo has issues, pick filters that would help.
+- Always recommend exactly 2 filters, ranked by best match first.
 """
 
 
@@ -176,8 +194,6 @@ def parse_analysis_response(text: str) -> dict:
                 "overall_quality": "unknown", "assessment": "Could not parse AI response",
             },
             "description": None,
-            "is_good_for_dating_profile": None,
-            "profile_tips": None,
             "parse_error": str(e),
         }
 
@@ -195,8 +211,6 @@ def _extract_token_usage(response) -> dict:
     return usage
 
 
-# ── Recommendation builder ────────────────────────────────────────────────────
-
 def build_recommendations(metadata: dict, analysis: dict) -> list[dict]:
     recs = []
 
@@ -205,7 +219,7 @@ def build_recommendations(metadata: dict, analysis: dict) -> list[dict]:
     if not orientation.get("is_correct", True) and rotation_degrees in (90, 180, 270):
         recs.append({
             "type": "rotation",
-            "label": f"Rotate {rotation_degrees}\u00b0",
+            "label": f"Rotate {rotation_degrees}°",
             "description": orientation.get("reason") or "Image appears incorrectly oriented",
             "confidence": orientation.get("confidence", "medium"),
             "method": "local",
@@ -220,9 +234,9 @@ def build_recommendations(metadata: dict, analysis: dict) -> list[dict]:
         edit_pricing = config.PRICING.get(config.EDIT_MODEL, {})
         recs.append({
             "type": "upscale",
-            "label": f"Upscale ({short_side}px \u2192 {target}px)",
+            "label": f"Upscale ({short_side}px → {target}px)",
             "description": (
-                f"Resolution is {metadata['width']}\u00d7{metadata['height']}. "
+                f"Resolution is {metadata['width']}×{metadata['height']}. "
                 f"Short side ({short_side}px) is below {config.MIN_RESOLUTION_SHORT_SIDE}px threshold."
             ),
             "confidence": "high",
@@ -232,35 +246,80 @@ def build_recommendations(metadata: dict, analysis: dict) -> list[dict]:
             "params": {"target_resolution": target},
         })
 
-    filters = analysis.get("filters", {})
-    if filters.get("needs_editing", False):
-        suggestions = filters.get("suggestions", [])
-        if suggestions:
-            edit_prompts = [s.get("edit_prompt", s.get("description", "")) for s in suggestions]
-            combined_prompt = "; ".join(p for p in edit_prompts if p)
-            descriptions = [
-                f"\u2022 {s.get('type', 'edit')}: {s.get('description', '')}"
-                for s in suggestions
-            ]
-            edit_pricing = config.PRICING.get(config.EDIT_MODEL, {})
-            recs.append({
-                "type": "filter",
-                "label": f"{len(suggestions)} filter(s) suggested",
-                "description": "\n".join(descriptions),
-                "confidence": "medium",
-                "method": "api",
-                "model": config.EDIT_MODEL,
-                "estimated_cost": edit_pricing.get("per_image_2k", 0.20),
-                "params": {
-                    "edit_prompt": combined_prompt,
-                    "suggestions": suggestions,
-                },
-            })
-
     return recs
 
 
-# ── Cost estimation ───────────────────────────────────────────────────────────
+async def match_filters_for_image(
+    aclient,
+    analysis: dict,
+    semaphore: asyncio.Semaphore,
+) -> tuple[list[dict], dict]:
+    """Cross-reference image analysis with filter research report to find top 2 filters."""
+    from filter_report import FILTER_CATALOG, get_filter_by_id
+
+    empty_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+
+    scene = analysis.get("scene", {})
+    quality = analysis.get("quality", {})
+
+    catalog_text = ""
+    for f in FILTER_CATALOG:
+        catalog_text += (
+            f"- {f['name']} (id: {f['id']}, category: {f['category']})\n"
+            f"  Best for: {', '.join(f['best_for'])}\n"
+            f"  Description: {f['description']}\n"
+            f"  Color profile: highlights={f['color_profile']['highlights']}, "
+            f"shadows={f['color_profile']['shadows']}, midtones={f['color_profile']['midtones']}\n"
+            f"  Mood: {f['mood']}\n"
+            f"  Intensity: {f['intensity']}\n\n"
+        )
+
+    prompt = FILTER_MATCHING_PROMPT.format(
+        setting=scene.get("setting", "unknown"),
+        lighting=scene.get("lighting", "unknown"),
+        dominant_colors=", ".join(scene.get("dominant_colors", [])),
+        mood=scene.get("mood", "unknown"),
+        background_type=scene.get("background_type", "unknown"),
+        quality=quality.get("overall", "unknown"),
+        assessment=quality.get("assessment", ""),
+        issues=", ".join(quality.get("issues", [])) or "none",
+        description=analysis.get("description", ""),
+        filter_catalog=catalog_text,
+    )
+
+    async with semaphore:
+        for attempt in range(3):
+            try:
+                contents = [types.Part.from_text(text=prompt)]
+                response = await aclient.models.generate_content(
+                    model=config.ANALYSIS_MODEL,
+                    contents=contents,
+                )
+                usage = _extract_token_usage(response)
+                text = response.text if response else None
+                if not text:
+                    return [], usage
+
+                parsed = parse_analysis_response(text)
+                raw_recs = parsed.get("recommendations", [])
+                matched_filters = []
+                for rec in raw_recs[:2]:
+                    filt = get_filter_by_id(rec.get("filter_id", ""))
+                    if filt:
+                        matched_filters.append({
+                            "filter": filt,
+                            "match_reason": rec.get("match_reason", ""),
+                        })
+                return matched_filters, usage
+            except Exception as e:
+                err_str = str(e).lower()
+                retryable = any(k in err_str for k in ("429", "500", "resource_exhausted", "internal"))
+                if retryable and attempt < 2:
+                    await asyncio.sleep(5 * (attempt + 1))
+                    continue
+                return [], empty_usage
+    return [], empty_usage
+
 
 def estimate_analysis_cost(token_usage: dict) -> float:
     pricing = config.PRICING.get(config.ANALYSIS_MODEL, {})
@@ -278,8 +337,6 @@ def estimate_total_edit_cost(images: list[dict]) -> float:
                 total += rec.get("estimated_cost", 0)
     return total
 
-
-# ── Single image analysis ─────────────────────────────────────────────────────
 
 async def analyze_one(
     aclient,
@@ -325,8 +382,6 @@ async def analyze_one(
         return None, f"Max retries exceeded: {path}", empty_usage
 
 
-# ── Batch analysis ────────────────────────────────────────────────────────────
-
 async def analyze_batch(
     paths: list[Path],
     progress_callback: Callable[[int, int], None] | None = None,
@@ -358,6 +413,17 @@ async def analyze_batch(
             progress_callback(completed[0], total)
         if analysis:
             recommendations = build_recommendations(metadata, analysis)
+
+            filter_matches, filter_usage = await match_filters_for_image(
+                aclient, analysis, semaphore
+            )
+            for k in ("prompt_tokens", "completion_tokens", "total_tokens"):
+                usage[k] += filter_usage.get(k, 0)
+
+            suggested_name = analysis.get("suggested_name", "")
+            if not suggested_name:
+                suggested_name = (analysis.get("description") or p.stem)[:40]
+
             result = {
                 "filename": p.name,
                 "original_path": str(p),
@@ -365,10 +431,10 @@ async def analyze_batch(
                 "metadata": metadata,
                 "analysis": analysis,
                 "recommendations": recommendations,
+                "filter_recommendations": filter_matches,
+                "suggested_name": suggested_name,
                 "description": analysis.get("description"),
-                "is_good_for_dating_profile": analysis.get("is_good_for_dating_profile"),
-                "profile_tips": analysis.get("profile_tips"),
-                "quality": analysis.get("filters", {}).get("overall_quality", "unknown"),
+                "quality": analysis.get("quality", {}).get("overall", "unknown"),
                 "estimated_edit_cost": sum(r.get("estimated_cost", 0) for r in recommendations),
                 "approved_edits": [],
             }

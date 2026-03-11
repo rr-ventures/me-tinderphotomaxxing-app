@@ -1,10 +1,13 @@
 """
 ImageStudio — Edit operations.
-Applies rotation (local/free), resolution upscaling, and filter enhancements
-via Nano Banana Pro (gemini-3-pro-image-preview).
+Applies rotation (local/free) and resolution upscaling (API).
+Filters are recommendation-only and never applied.
+Originals are NEVER modified — all operations work on copies.
 """
 import io
 import os
+import re
+import shutil
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -16,15 +19,14 @@ import config
 
 load_dotenv()
 
+try:
+    import pillow_heif
+    pillow_heif.register_heif_opener()
+except ImportError:
+    pass
+
 
 def _open_image(path: Path) -> Image.Image:
-    ext = path.suffix.lower()
-    if ext == ".heic":
-        try:
-            import pillow_heif
-            pillow_heif.register_heif_opener()
-        except Exception:
-            pass
     return Image.open(path)
 
 
@@ -35,9 +37,8 @@ def _image_to_jpeg_bytes(img: Image.Image, quality: int = 95) -> bytes:
 
 
 def _save_format(path: Path) -> str:
-    ext = path.suffix.lower()
     fmt_map = {".jpg": "JPEG", ".jpeg": "JPEG", ".png": "PNG", ".webp": "WEBP"}
-    return fmt_map.get(ext, "JPEG")
+    return fmt_map.get(path.suffix.lower(), "JPEG")
 
 
 def _get_client() -> genai.Client:
@@ -48,28 +49,75 @@ def _get_client() -> genai.Client:
 
 
 def _extract_image_from_response(response) -> bytes | None:
-    for part in response.candidates[0].content.parts:
-        if hasattr(part, "inline_data") and part.inline_data:
-            return part.inline_data.data
+    try:
+        if not response.candidates:
+            return None
+        parts = response.candidates[0].content.parts
+        for part in parts:
+            if hasattr(part, "inline_data") and part.inline_data:
+                return part.inline_data.data
+    except (IndexError, AttributeError):
+        pass
     return None
 
 
-# ── Rotation (local, free) ───────────────────────────────────────────────────
+def _sanitize_filename(name: str) -> str:
+    """Turn a suggested name into a safe filename component."""
+    name = re.sub(r'[<>:"/\\|?*]', '', name)
+    name = re.sub(r'\s+', ' ', name).strip()
+    name = name.title()
+    if not name:
+        name = "Photo"
+    return name
+
+
+def build_output_name(image_data: dict, suffix: str = "") -> str:
+    """Build a descriptive output filename from analysis data.
+
+    Example: "Profile Photo - Pool Resort.jpg"
+    """
+    suggested = image_data.get("suggested_name", "")
+    if not suggested:
+        suggested = image_data.get("filename", "photo")
+        suggested = Path(suggested).stem
+
+    safe_name = _sanitize_filename(suggested)
+    ext = Path(image_data.get("filename", "photo.jpg")).suffix.lower() or ".jpg"
+
+    if suffix:
+        return f"Profile Photo - {safe_name}{suffix}{ext}"
+    return f"Profile Photo - {safe_name}{ext}"
+
 
 def rotate_image(path: Path, degrees: int, output_path: Path) -> Path:
     img = _open_image(path)
-    rotated = img.rotate(-degrees, expand=True)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    rotated.save(str(output_path), format=_save_format(path), quality=95)
+    try:
+        rotated = img.rotate(-degrees, expand=True)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        rotated.save(str(output_path), format=_save_format(path), quality=95)
+    finally:
+        img.close()
     return output_path
 
 
-# ── Resolution upscale (Nano Banana Pro API) ─────────────────────────────────
+def preview_rotation(path: Path, degrees: int) -> Image.Image:
+    """Return a rotated PIL Image for preview (does NOT save to disk)."""
+    img = _open_image(path)
+    try:
+        rotated = img.rotate(-degrees, expand=True)
+        rotated.thumbnail((600, 600))
+        return rotated.copy()
+    finally:
+        img.close()
+
 
 def upscale_image(path: Path, output_path: Path, target_resolution: int | None = None) -> Path:
     client = _get_client()
-    img = _open_image(path).convert("RGB")
-    image_bytes = _image_to_jpeg_bytes(img)
+    img = _open_image(path)
+    try:
+        image_bytes = _image_to_jpeg_bytes(img.convert("RGB"))
+    finally:
+        img.close()
 
     prompt = (
         "Upscale and enhance this photo to higher resolution. "
@@ -106,63 +154,30 @@ def upscale_image(path: Path, output_path: Path, target_resolution: int | None =
     return output_path
 
 
-# ── Filter enhancement (Nano Banana Pro API) ─────────────────────────────────
+def preview_upscale(path: Path) -> Path:
+    """Upscale a single image to a temp preview file and return the path.
 
-def apply_filters(path: Path, output_path: Path, edit_prompt: str) -> Path:
-    client = _get_client()
-    img = _open_image(path).convert("RGB")
-    image_bytes = _image_to_jpeg_bytes(img)
+    This lets the user see the result before batch-processing.
+    """
+    preview_dir = Path(config.OUTPUT_DIR) / "previews"
+    preview_dir.mkdir(parents=True, exist_ok=True)
+    preview_path = preview_dir / f"preview_upscale_{path.stem}.jpg"
+    return upscale_image(path, preview_path)
 
-    prompt = (
-        "You are a professional dating profile photo editor. "
-        "Apply the following edits to this photo while preserving the subject and composition: "
-        f"{edit_prompt}. "
-        "Make the adjustments look natural and professional, as if done by an expert photographer."
-    )
-
-    contents = [
-        types.Content(
-            role="user",
-            parts=[
-                types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg"),
-                types.Part.from_text(text=prompt),
-            ],
-        )
-    ]
-
-    response = client.models.generate_content(
-        model=config.EDIT_MODEL,
-        contents=contents,
-        config=types.GenerateContentConfig(
-            response_modalities=["IMAGE", "TEXT"],
-        ),
-    )
-
-    image_data = _extract_image_from_response(response)
-    if not image_data:
-        raise RuntimeError(f"No image returned from API for filter edit of {path}")
-
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(output_path, "wb") as f:
-        f.write(image_data)
-    return output_path
-
-
-# ── Apply all approved edits for one image ────────────────────────────────────
 
 def apply_edits(image_data: dict, output_dir: Path) -> dict:
-    """
-    Apply all approved edits for a single image in sequence.
-    Returns a result dict with status, output paths, and any errors.
-    """
+    """Apply approved edits to a COPY of the image. Original is never modified."""
     original = Path(image_data["original_path"])
     approved = set(image_data.get("approved_edits", []))
     recommendations = image_data.get("recommendations", [])
-    stem = original.stem
-    suffix = original.suffix.lower() or ".jpg"
+
+    output_name = build_output_name(image_data)
+    stem = Path(output_name).stem
+    suffix = Path(output_name).suffix or ".jpg"
 
     result = {
         "filename": image_data["filename"],
+        "output_name": output_name,
         "original_path": str(original),
         "edits_applied": [],
         "errors": [],
@@ -170,6 +185,16 @@ def apply_edits(image_data: dict, output_dir: Path) -> dict:
     }
 
     if not approved:
+        if image_data.get("approved_rename", False):
+            final_out = output_dir / output_name
+            final_out.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(str(original), str(final_out))
+            result["output_path"] = str(final_out)
+            result["edits_applied"].append({
+                "type": "rename",
+                "cost": 0.0,
+                "output": str(final_out),
+            })
         return result
 
     current_path = original
@@ -202,26 +227,13 @@ def apply_edits(image_data: dict, output_dir: Path) -> dict:
                     "output": str(out),
                 })
 
-            elif rec["type"] == "filter":
-                out = edit_dir / f"{stem}_filtered{suffix}"
-                prompt = rec["params"].get("edit_prompt", "")
-                apply_filters(current_path, out, prompt)
-                current_path = out
-                result["edits_applied"].append({
-                    "type": "filter",
-                    "cost": rec.get("estimated_cost", 0),
-                    "output": str(out),
-                })
-
         except Exception as e:
             result["errors"].append({"type": rec["type"], "error": str(e)})
 
-    final_out = output_dir / f"{stem}_final{suffix}"
-    if current_path != original and current_path.exists():
-        import shutil
+    if result["edits_applied"] and current_path != original and current_path.exists():
+        final_out = output_dir / output_name
+        final_out.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(str(current_path), str(final_out))
         result["output_path"] = str(final_out)
-    elif current_path == original:
-        result["output_path"] = str(original)
 
     return result

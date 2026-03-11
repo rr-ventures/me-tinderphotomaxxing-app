@@ -31,6 +31,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="ImageStudio — CLI photo analysis")
     parser.add_argument("--test", action="store_true",
                         help=f"Only analyze {config.TEST_SAMPLE_SIZE} images")
+    parser.add_argument("--batch", type=int, default=0,
+                        help="Number of images to analyze (0 = all)")
     args = parser.parse_args()
 
     input_dir = Path(config.INPUT_DIR).resolve()
@@ -50,6 +52,9 @@ def main() -> None:
     if args.test:
         paths = paths[:config.TEST_SAMPLE_SIZE]
         print(f"TEST MODE: analyzing only {len(paths)} images")
+    elif args.batch > 0:
+        paths = paths[:args.batch]
+        print(f"BATCH MODE: analyzing {len(paths)} of {len(all_paths)} images")
     else:
         print(f"Analyzing {len(paths)} images with {config.ANALYSIS_MODEL}...")
 
@@ -60,6 +65,7 @@ def main() -> None:
         "input_dir": str(input_dir),
         "status": "incomplete",
         "test_mode": args.test,
+        "batch_size": args.batch if args.batch > 0 else len(paths),
         "analysis_model": config.ANALYSIS_MODEL,
         "edit_model": config.EDIT_MODEL,
         "images": [],

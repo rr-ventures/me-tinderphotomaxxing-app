@@ -1,6 +1,11 @@
 """
 ImageStudio — AI-powered bulk image analysis & editing.
-Clean Streamlit UI with step-by-step wizard flow.
+Streamlit UI with guided step-by-step wizard flow.
+
+Key principles:
+  - Originals are NEVER modified — all edits produce copies
+  - Filters are recommendation-only (matched from research report)
+  - User controls batch size and previews before committing
 """
 import asyncio
 import json
@@ -17,33 +22,62 @@ from analyzer import (
     estimate_total_edit_cost,
     scan_image_paths,
 )
-from editor import apply_edits
+from editor import apply_edits, build_output_name, preview_rotation, preview_upscale
 
 INPUT_DIR = Path(config.INPUT_DIR).resolve()
 RUNS_DIR = Path(config.RUNS_DIR).resolve()
 OUTPUT_DIR = Path(config.OUTPUT_DIR).resolve()
 
-IMAGES_PER_PAGE = 20
 GRID_COLS = 4
+PER_PAGE = 16
+STEP_NAMES = ["Import", "Analyze", "Review", "Apply", "Done"]
 
 
-# ── Minimal CSS — only theming, no layout hacks ──────────────────────────────
+# ── CSS ───────────────────────────────────────────────────────────────────────
 
 def _inject_css():
     st.markdown("""<style>
-    #MainMenu, footer, header {visibility: hidden;}
-    .stDeployButton {display: none;}
+    #MainMenu, footer, header { visibility: hidden; }
+    .stDeployButton { display: none; }
     [data-testid="stMetric"] {
-        background: #333;
-        border: 1px solid #444;
-        border-radius: 8px;
-        padding: 12px 16px;
+        background: #262626;
+        border: 1px solid #383838;
+        border-radius: 10px;
+        padding: 14px 18px;
     }
     [data-testid="stMetricValue"] { font-weight: 700; }
     .stProgress > div > div {
         background: linear-gradient(90deg, #2680EB, #56a0f5) !important;
     }
+    .filter-rec {
+        background: #1a1a2e;
+        border: 1px solid #2680EB;
+        border-radius: 8px;
+        padding: 10px 14px;
+        margin: 4px 0;
+    }
+    .rename-badge {
+        background: #2d2d2d;
+        border-radius: 6px;
+        padding: 4px 8px;
+        font-size: 0.85em;
+        color: #56a0f5;
+    }
     </style>""", unsafe_allow_html=True)
+
+
+# ── Step breadcrumb ───────────────────────────────────────────────────────────
+
+def _step_bar(current: int):
+    parts = []
+    for i, name in enumerate(STEP_NAMES, 1):
+        if i < current:
+            parts.append(f"✓ {name}")
+        elif i == current:
+            parts.append(f"**{name}**")
+        else:
+            parts.append(name)
+    st.caption(" → ".join(parts))
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -53,9 +87,8 @@ def _list_runs() -> list[Path]:
         return []
     return sorted(
         (f for f in RUNS_DIR.glob("*.json")
-         if not f.name.endswith("_errors.json")
-         and not f.name.endswith("_sorted_manifest.json")
-         and not f.name.endswith("_edit_results.json")),
+         if not any(f.name.endswith(s) for s in
+                    ("_errors.json", "_sorted_manifest.json", "_edit_results.json"))),
         key=lambda p: p.name, reverse=True,
     )
 
@@ -76,10 +109,10 @@ def _save_manifest(manifest: dict, path: Path) -> None:
 
 def _go_to(screen: str):
     clear_map = {
-        "dashboard": ["has_results", "analyzing", "processing", "edit_results",
-                       "manifest", "images", "manifest_path", "analysis_paths"],
-        "review": ["analyzing", "processing", "edit_results"],
-        "analyzing": ["has_results", "processing", "edit_results"],
+        "dashboard": ["analyzing", "processing", "edit_complete", "analysis_paths",
+                       "has_results"],
+        "review":    ["analyzing", "processing", "edit_complete"],
+        "analyzing": ["has_results", "processing", "edit_complete"],
     }
     for k in clear_map.get(screen, []):
         st.session_state.pop(k, None)
@@ -89,11 +122,13 @@ def _go_to(screen: str):
 
 def _load_run(path: Path):
     m = _load_manifest(path)
+    if not m:
+        return
     st.session_state.manifest_path = str(path)
     st.session_state.manifest = m
-    st.session_state.images = list((m or {}).get("images", []))
+    st.session_state.images = list(m.get("images", []))
     st.session_state.has_results = True
-    for k in ("edit_results", "processing", "analyzing"):
+    for k in ("edit_complete", "processing", "analyzing"):
         st.session_state.pop(k, None)
 
 
@@ -103,11 +138,14 @@ def _auto_save():
     images = st.session_state.get("images")
     if manifest and path and images:
         manifest["images"] = images
-        _save_manifest(manifest, Path(path))
+        try:
+            _save_manifest(manifest, Path(path))
+        except OSError:
+            pass
 
 
 def _current_screen() -> str:
-    if st.session_state.get("edit_results"):
+    if st.session_state.get("edit_complete"):
         return "complete"
     if st.session_state.get("processing"):
         return "processing"
@@ -121,9 +159,10 @@ def _current_screen() -> str:
 def _count_images(folder: Path) -> int:
     if not folder.exists():
         return 0
+    exts = {e.lower() for e in config.SUPPORTED_EXTENSIONS}
     return sum(
         1 for f in folder.rglob("*")
-        if f.is_file() and f.suffix.lower() in config.SUPPORTED_EXTENSIONS
+        if f.is_file() and f.suffix.lower() in exts
     )
 
 
@@ -141,16 +180,13 @@ def main():
     screen = _current_screen()
     _render_sidebar(screen)
 
-    if screen == "complete":
-        _screen_complete()
-    elif screen == "processing":
-        _screen_processing()
-    elif screen == "review":
-        _screen_review()
-    elif screen == "analyzing":
-        _screen_analyzing()
-    else:
-        _screen_dashboard()
+    screens = {
+        "complete":   _screen_complete,
+        "processing": _screen_processing,
+        "review":     _screen_review,
+        "analyzing":  _screen_analyzing,
+    }
+    screens.get(screen, _screen_dashboard)()
 
 
 # ── Sidebar ───────────────────────────────────────────────────────────────────
@@ -175,17 +211,11 @@ def _render_sidebar(screen: str):
         manifest = st.session_state.get("manifest") or {}
 
         if images:
-            n = len(images)
-            needs_edit = sum(1 for img in images if img.get("recommendations"))
-            approved = sum(1 for img in images if img.get("approved_edits"))
-            st.metric("Images Analyzed", n)
-            st.metric("Need Edits", needs_edit)
-            st.metric("Approved", approved)
-
+            st.metric("Analyzed", len(images))
+            st.metric("Need Edits", sum(1 for img in images if img.get("recommendations")))
             tok = manifest.get("token_usage")
             if tok and tok.get("total_tokens"):
-                cost = estimate_analysis_cost(tok)
-                st.metric("API Cost", f"${cost:.4f}")
+                st.metric("API Cost", f"${estimate_analysis_cost(tok):.4f}")
 
         runs = _list_runs()
         if runs and screen in ("dashboard", "review"):
@@ -194,110 +224,164 @@ def _render_sidebar(screen: str):
             for r in runs[:5]:
                 m = _load_manifest(r)
                 n_imgs = len((m or {}).get("images", [])) if m else 0
-                label = f"{r.stem} ({n_imgs} imgs)"
                 current = st.session_state.get("manifest_path", "")
                 if str(r) == current:
-                    st.caption(f"▶ {label}")
+                    st.caption(f"▶ {r.stem} ({n_imgs})")
                 else:
-                    if st.button(label, key=f"run_{r.name}", use_container_width=True):
+                    if st.button(f"{r.stem} ({n_imgs})", key=f"run_{r.name}",
+                                 use_container_width=True):
                         _load_run(r)
                         st.rerun()
 
 
-# ── SCREEN: Dashboard ─────────────────────────────────────────────────────────
+# ── SCREEN 1: Dashboard ──────────────────────────────────────────────────────
 
 def _screen_dashboard():
+    _step_bar(1)
     st.title("ImageStudio")
-    st.write("AI-powered bulk image analysis and editing. "
-             "Drop your photos in the `to_process/` folder, then analyze them below.")
+    st.write("AI-powered bulk image analysis and editing.")
+
+    st.info(
+        "**Originals are never modified.** All edits produce copies in the "
+        f"`{config.OUTPUT_DIR}` folder. Your source files remain untouched."
+    )
 
     INPUT_DIR.mkdir(parents=True, exist_ok=True)
-    total = _count_images(INPUT_DIR)
 
-    st.divider()
+    loaded_images = st.session_state.get("images", [])
+    if loaded_images:
+        st.success(f"You have **{len(loaded_images)}** analyzed images loaded.")
+        c1, c2 = st.columns(2)
+        with c1:
+            if st.button("Continue reviewing →", type="primary", use_container_width=True):
+                st.session_state.has_results = True
+                st.rerun()
+        with c2:
+            if st.button("Start fresh", use_container_width=True):
+                for k in ["manifest", "images", "manifest_path", "has_results",
+                           "edit_complete", "analyzing", "processing"]:
+                    st.session_state.pop(k, None)
+                st.rerun()
+        st.divider()
+
+    total = _count_images(INPUT_DIR)
 
     if total == 0:
         st.info(
-            "**No images found.** Add your images to the `to_process/` folder "
-            "(drag & drop in the file tree on the left), then come back here."
+            "**No images found.** Drop your images into the `to_process/` folder "
+            "(drag & drop in the file tree on the left), then click Refresh."
         )
-        if st.button("Refresh"):
+        if st.button("🔄 Refresh"):
             st.rerun()
         return
 
-    # Show count and folder info
-    c1, c2 = st.columns(2)
-    c1.metric("Images Ready", total)
-    c2.metric("Folder", "to_process/")
+    mc1, mc2 = st.columns([3, 1])
+    with mc1:
+        st.metric("Images in to_process/", total)
+    with mc2:
+        if st.button("🔄 Refresh", use_container_width=True):
+            st.rerun()
 
-    # Check API key
     api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
     if not api_key:
-        st.error("**No API key.** Add `GEMINI_API_KEY=your_key` to the `.env` file, then refresh.")
+        st.error("**No API key.** Add `GEMINI_API_KEY=your_key` to `.env`, then refresh.")
         return
 
     st.divider()
-    st.subheader("Start Analysis")
+    st.subheader("What will happen")
     st.write(
-        f"The AI will look at each image using **{config.ANALYSIS_MODEL}** and recommend:\n\n"
-        f"- **Rotation** — fix sideways or upside-down photos (free, done locally)\n"
-        f"- **Upscale** — increase resolution if below {config.MIN_RESOLUTION_SHORT_SIDE}px (~${config.PRICING.get(config.EDIT_MODEL, {}).get('per_image_2k', 0.20):.2f}/image)\n"
-        f"- **Filters** — color correction, brightness, contrast, etc. (~${config.PRICING.get(config.EDIT_MODEL, {}).get('per_image_2k', 0.20):.2f}/image)\n\n"
-        f"You'll review every recommendation before anything is applied."
+        f"The AI (**{config.ANALYSIS_MODEL}**) will look at each image and recommend:\n\n"
+        f"- **Rotation fix** — straighten sideways/upside-down photos *(free, done locally)*\n"
+        f"- **Resolution upscale** — enlarge images below {config.MIN_RESOLUTION_SHORT_SIDE}px "
+        f"*( ~${config.PRICING.get(config.EDIT_MODEL, {}).get('per_image_2k', 0.20):.2f}/image)*\n"
+        f"- **Filter recommendations** — suggest the best 2 filters from our research report "
+        f"*(recommendation only, not applied)*\n"
+        f"- **Smart rename** — suggest descriptive filenames based on photo content\n\n"
+        f"**You review and approve every recommendation** before anything is applied.\n\n"
+        f"**Originals are never modified** — only copies are created."
     )
 
+    st.divider()
+    st.subheader("How many images to analyze?")
+    st.write(
+        f"There are **{total}** images in the folder. "
+        f"Choose how many to process in this batch."
+    )
+
+    batch_size = st.number_input(
+        "Batch size",
+        min_value=config.MIN_PROCESS_BATCH_SIZE,
+        max_value=min(total, config.MAX_PROCESS_BATCH_SIZE),
+        value=min(total, config.DEFAULT_PROCESS_BATCH_SIZE),
+        step=10,
+        help=f"Process images in batches. You can run multiple batches to cover all {total} images.",
+    )
+
+    remaining_after = max(0, total - batch_size)
+    if remaining_after > 0:
+        st.caption(
+            f"This will analyze **{batch_size}** of {total} images. "
+            f"**{remaining_after}** will remain for future batches."
+        )
+
+    st.divider()
     col1, col2, col3 = st.columns(3)
     with col1:
-        if st.button(f"🧪 Test on {config.TEST_SAMPLE_SIZE} images", use_container_width=True):
-            _start_analysis(test_mode=True)
+        if st.button(
+            f"🚀  Analyze {batch_size} image(s)",
+            type="primary",
+            use_container_width=True,
+        ):
+            _start_analysis(batch_size=batch_size)
             st.rerun()
     with col2:
-        if st.button(f"🚀 Analyze all {total} images", type="primary", use_container_width=True):
-            _start_analysis(test_mode=False)
+        if st.button(
+            f"🧪  Test on {config.TEST_SAMPLE_SIZE} images",
+            use_container_width=True,
+        ):
+            _start_analysis(batch_size=config.TEST_SAMPLE_SIZE)
             st.rerun()
     with col3:
         runs = _list_runs()
         if runs:
-            if st.button("📂 Load last run", use_container_width=True):
+            if st.button("📂  Load last run", use_container_width=True):
                 _load_run(runs[0])
                 st.rerun()
         else:
-            st.button("📂 No previous runs", use_container_width=True, disabled=True)
+            st.button("📂  No previous runs", use_container_width=True, disabled=True)
 
-    # Preview grid
-    st.divider()
-    st.subheader("Preview")
-    _render_preview(INPUT_DIR, min(total, 8))
+    if total > 0:
+        st.divider()
+        st.caption("Preview (first 8 images)")
+        _render_preview(INPUT_DIR, min(total, 8))
 
 
 def _render_preview(folder: Path, max_show: int):
+    exts = {e.lower() for e in config.SUPPORTED_EXTENSIONS}
     files = sorted(
-        (f for f in folder.rglob("*")
-         if f.is_file() and f.suffix.lower() in config.SUPPORTED_EXTENSIONS),
+        (f for f in folder.rglob("*") if f.is_file() and f.suffix.lower() in exts),
         key=lambda f: f.name,
     )[:max_show]
-
     if not files:
         return
-
     cols = st.columns(min(len(files), GRID_COLS))
     for i, f in enumerate(files):
         with cols[i % GRID_COLS]:
             try:
                 from PIL import Image as PILImage
                 img = PILImage.open(f)
-                img.thumbnail((256, 256))
-                st.image(img, caption=f.name[:25], use_container_width=True)
+                img.thumbnail((200, 200))
+                st.image(img, caption=f.name[:20], use_container_width=True)
+                img.close()
             except Exception:
                 st.caption(f.name)
 
 
 # ── Analysis logic ────────────────────────────────────────────────────────────
 
-def _start_analysis(test_mode: bool):
+def _start_analysis(batch_size: int):
     paths = scan_image_paths(INPUT_DIR)
-    if test_mode:
-        paths = paths[:config.TEST_SAMPLE_SIZE]
+    paths = paths[:batch_size]
 
     RUNS_DIR.mkdir(parents=True, exist_ok=True)
     ts = datetime.now().strftime("%Y-%m-%d_%H%M%S")
@@ -306,7 +390,7 @@ def _start_analysis(test_mode: bool):
         "run_id": ts,
         "input_dir": str(INPUT_DIR),
         "status": "incomplete",
-        "test_mode": test_mode,
+        "batch_size": batch_size,
         "analysis_model": config.ANALYSIS_MODEL,
         "edit_model": config.EDIT_MODEL,
         "total_queued": len(paths),
@@ -339,18 +423,17 @@ def _retry_failed(failed_paths: list[Path]):
         manifest["errors"].extend(errors)
         for k in ("prompt_tokens", "completion_tokens", "total_tokens"):
             manifest["token_usage"][k] += usage.get(k, 0)
-        manifest["total_analyzed"] = len(manifest["images"])
-        manifest["total_errors"] = len(manifest["errors"])
         _save_manifest(manifest, Path(manifest_path))
         st.session_state.images = list(manifest["images"])
     except Exception as e:
         st.error(f"Retry failed: {e}")
 
 
-# ── SCREEN: Analyzing ─────────────────────────────────────────────────────────
+# ── SCREEN 2: Analyzing ──────────────────────────────────────────────────────
 
 def _screen_analyzing():
-    st.title("Analyzing...")
+    _step_bar(2)
+    st.title("Analyzing images...")
 
     manifest = st.session_state.manifest
     manifest_path = Path(st.session_state.manifest_path)
@@ -368,8 +451,8 @@ def _screen_analyzing():
     total = len(paths)
     batch_size = min(config.BATCH_SIZE, total)
 
-    st.write(f"Processing **{total}** images in batches of {batch_size} "
-             f"using **{config.ANALYSIS_MODEL}**.")
+    st.write(f"Processing **{total}** images in batches of {batch_size}.")
+    st.caption("Each image is analyzed for orientation, resolution, scene/colors, and matched against filter research report.")
 
     progress_bar = st.progress(0.0)
     status_text = st.empty()
@@ -377,6 +460,7 @@ def _screen_analyzing():
 
     remaining_paths = list(paths)
     max_retry_rounds = 3
+    all_round_errors: list[dict] = []
 
     for retry_round in range(max_retry_rounds + 1):
         if not remaining_paths:
@@ -385,12 +469,12 @@ def _screen_analyzing():
         if retry_round > 0:
             status_text.info(
                 f"Retrying {len(remaining_paths)} failed file(s) "
-                f"(attempt {retry_round} of {max_retry_rounds})..."
+                f"(attempt {retry_round}/{max_retry_rounds})..."
             )
 
         batches = [remaining_paths[i:i + batch_size]
                     for i in range(0, len(remaining_paths), batch_size)]
-        round_errors = []
+        round_errors: list[dict] = []
 
         for batch_num, batch in enumerate(batches, 1):
             names = ", ".join(p.name for p in batch[:3])
@@ -414,30 +498,26 @@ def _screen_analyzing():
             _save_manifest(manifest, manifest_path)
 
             n_done = len(manifest["images"])
-            pct = min(n_done / total, 1.0)
-            progress_bar.progress(pct, text=f"{n_done} / {total} images")
+            progress_bar.progress(min(n_done / total, 1.0), text=f"{n_done} / {total}")
             cost = estimate_analysis_cost(manifest["token_usage"])
-            cost_text.caption(
-                f"Cost so far: ${cost:.4f} · "
-                f"{manifest['token_usage']['total_tokens']:,} tokens"
-            )
+            cost_text.caption(f"Cost: ${cost:.4f} · {manifest['token_usage']['total_tokens']:,} tokens")
 
         remaining_paths = [
             Path(e["path"]) for e in round_errors
             if e.get("path") and e["path"] != "?" and Path(e["path"]).exists()
         ]
-        if not remaining_paths:
-            break
+        for e in round_errors:
+            p = e.get("path", "?")
+            if p == "?" or not Path(p).exists():
+                all_round_errors.append(e)
 
-    # Record any final errors
-    if remaining_paths:
-        for p in remaining_paths:
-            manifest["errors"].append({
-                "path": str(p), "filename": p.name,
-                "error": "Failed after all retry rounds",
-            })
+    manifest["errors"].extend(all_round_errors)
+    for p in remaining_paths:
+        manifest["errors"].append({
+            "path": str(p), "filename": p.name,
+            "error": "Failed after all retry rounds",
+        })
 
-    # Completeness check — catch files that fell through the cracks
     analyzed_set = {img["original_path"] for img in manifest["images"]}
     error_set = {e["path"] for e in manifest.get("errors", []) if e.get("path")}
     missed = {str(p) for p in paths} - analyzed_set - error_set
@@ -445,7 +525,7 @@ def _screen_analyzing():
     if missed:
         missed_paths = [Path(p) for p in missed if Path(p).exists()]
         if missed_paths:
-            status_text.write(f"Picking up {len(missed_paths)} missed file(s)...")
+            status_text.write(f"Catching {len(missed_paths)} missed file(s)...")
             try:
                 results, errors, usage = asyncio.run(analyze_batch(missed_paths))
                 manifest["images"].extend(results)
@@ -456,10 +536,9 @@ def _screen_analyzing():
                 for p in missed_paths:
                     manifest["errors"].append({
                         "path": str(p), "filename": p.name,
-                        "error": "Failed during final completeness retry",
+                        "error": "Failed during completeness retry",
                     })
 
-    # Finalize
     n_imgs = len(manifest["images"])
     n_errs = len(manifest.get("errors", []))
     manifest["total_analyzed"] = n_imgs
@@ -473,99 +552,104 @@ def _screen_analyzing():
     st.session_state.has_results = True
 
     progress_bar.progress(1.0, text="Done!")
+    status_text.empty()
+    cost_text.empty()
 
     needs_edit = sum(1 for img in manifest["images"] if img.get("recommendations"))
     cost = estimate_analysis_cost(manifest["token_usage"])
 
     if n_errs > 0:
-        st.warning(f"Done — {n_imgs} analyzed, {n_errs} error(s), {needs_edit} need edits. Cost: ${cost:.4f}")
+        st.warning(
+            f"**{n_imgs}** images analyzed, **{n_errs}** error(s), "
+            f"**{needs_edit}** need edits. Cost: **${cost:.4f}**"
+        )
     else:
-        st.success(f"Done — {n_imgs}/{total} analyzed, {needs_edit} need edits. Cost: ${cost:.4f}")
+        st.success(
+            f"All **{n_imgs}/{total}** images analyzed, "
+            f"**{needs_edit}** need edits. Cost: **${cost:.4f}**"
+        )
 
-    status_text.empty()
-    cost_text.empty()
-
-    if st.button("Review Results →", type="primary", use_container_width=True):
+    if st.button("Review results →", type="primary", use_container_width=True):
         st.rerun()
 
 
-# ── SCREEN: Review ────────────────────────────────────────────────────────────
+# ── SCREEN 3: Review ─────────────────────────────────────────────────────────
 
 def _screen_review():
     images = st.session_state.get("images", [])
     manifest = st.session_state.get("manifest") or {}
 
     if not images:
+        _step_bar(3)
         st.info("No results yet. Run an analysis first.")
         if st.button("Back to Dashboard"):
             _go_to("dashboard")
             st.rerun()
         return
 
-    st.title("Review Results")
+    _step_bar(3)
+    st.title("Review recommendations")
 
-    if manifest.get("test_mode"):
-        st.warning("This was a **test run** — only a sample was analyzed. "
-                    "Go back to the dashboard to run the full analysis when ready.")
+    st.info(
+        "**Originals are never modified.** Approved edits will create copies "
+        f"in `{config.OUTPUT_DIR}`. Filter recommendations are for reference only — "
+        "they tell you which filter to apply in your editing software."
+    )
 
-    # Completeness warning
-    total_queued = manifest.get("total_queued", 0)
-    n_errs = len(manifest.get("errors", []))
-    if total_queued > 0 and len(images) + n_errs < total_queued:
-        gap = total_queued - len(images) - n_errs
-        st.error(f"**{gap} file(s)** were not processed. Consider re-running analysis.")
+    if manifest.get("batch_size"):
+        total_in_folder = _count_images(INPUT_DIR)
+        analyzed = len(images)
+        if analyzed < total_in_folder:
+            st.warning(
+                f"**Batch mode** — {analyzed} of {total_in_folder} images analyzed. "
+                f"Go back to the dashboard to analyze more batches."
+            )
 
-    # Summary
+    # Summary metrics
     n = len(images)
     needs_rotation = sum(1 for img in images
                          for r in img.get("recommendations", []) if r["type"] == "rotation")
     needs_upscale = sum(1 for img in images
                         for r in img.get("recommendations", []) if r["type"] == "upscale")
-    needs_filter = sum(1 for img in images
-                       for r in img.get("recommendations", []) if r["type"] == "filter")
+    has_filter_recs = sum(1 for img in images if img.get("filter_recommendations"))
     needs_any = sum(1 for img in images if img.get("recommendations"))
     no_edits = n - needs_any
 
-    tok = manifest.get("token_usage", {})
-    analysis_cost = estimate_analysis_cost(tok)
-
     c1, c2, c3, c4, c5 = st.columns(5)
     c1.metric("Total", n)
-    c2.metric("Rotation", needs_rotation)
-    c3.metric("Upscale", needs_upscale)
-    c4.metric("Filters", needs_filter)
-    c5.metric("OK as-is", no_edits)
+    c2.metric("🔄 Rotation", needs_rotation)
+    c3.metric("📐 Upscale", needs_upscale)
+    c4.metric("✨ Filter Recs", has_filter_recs)
+    c5.metric("✅ No edits", no_edits)
 
     st.divider()
 
-    # Tabs
-    tab_all, tab_rotation, tab_upscale, tab_filter, tab_ok = st.tabs([
+    tab_all, tab_rot, tab_up, tab_filt, tab_ok = st.tabs([
         f"All ({n})",
-        f"🔄 Rotation ({needs_rotation})",
-        f"📐 Upscale ({needs_upscale})",
-        f"✨ Filters ({needs_filter})",
-        f"✅ No Edits ({no_edits})",
+        f"Rotation ({needs_rotation})",
+        f"Upscale ({needs_upscale})",
+        f"Filter Recs ({has_filter_recs})",
+        f"No edits ({no_edits})",
     ])
 
     with tab_all:
         _render_grid(images, "all")
-    with tab_rotation:
+    with tab_rot:
         _render_grid(
             [img for img in images
              if any(r["type"] == "rotation" for r in img.get("recommendations", []))],
-            "rotation",
+            "rot",
         )
-    with tab_upscale:
+    with tab_up:
         _render_grid(
             [img for img in images
              if any(r["type"] == "upscale" for r in img.get("recommendations", []))],
-            "upscale",
+            "up",
         )
-    with tab_filter:
+    with tab_filt:
         _render_grid(
-            [img for img in images
-             if any(r["type"] == "filter" for r in img.get("recommendations", []))],
-            "filter",
+            [img for img in images if img.get("filter_recommendations")],
+            "filt",
         )
     with tab_ok:
         _render_grid(
@@ -573,10 +657,11 @@ def _screen_review():
             "ok",
         )
 
-    # Errors
+    # Errors section
+    n_errs = len(manifest.get("errors", []))
     if n_errs > 0:
         st.divider()
-        with st.expander(f"⚠️ {n_errs} error(s)"):
+        with st.expander(f"⚠️ {n_errs} error(s) — click to view"):
             for e in manifest.get("errors", []):
                 st.text(f"{e.get('filename', e.get('path', '?'))}: {e.get('error', '?')}")
             retryable = [
@@ -590,17 +675,21 @@ def _screen_review():
 
     st.divider()
 
-    # Batch actions
-    st.subheader("Bulk Actions")
+    # Bulk actions
+    st.subheader("Select edits to apply")
+    st.caption("Only rotation and upscale can be applied. Filters are recommendations only.")
     col1, col2, col3, col4 = st.columns(4)
     with col1:
-        if st.button("✅ Approve all edits", use_container_width=True):
+        if st.button("Select all edits", use_container_width=True):
             for img in images:
-                img["approved_edits"] = [r["type"] for r in img.get("recommendations", [])]
+                img["approved_edits"] = [
+                    r["type"] for r in img.get("recommendations", [])
+                    if r["type"] in ("rotation", "upscale")
+                ]
             _auto_save()
             st.rerun()
     with col2:
-        if st.button("🔄 Approve rotations only", use_container_width=True):
+        if st.button("Select rotations only", use_container_width=True):
             for img in images:
                 approved = set(img.get("approved_edits", []))
                 for r in img.get("recommendations", []):
@@ -610,75 +699,84 @@ def _screen_review():
             _auto_save()
             st.rerun()
     with col3:
-        if st.button("🆓 Approve free edits only", use_container_width=True):
+        if st.button("Select upscales only", use_container_width=True):
             for img in images:
                 approved = set(img.get("approved_edits", []))
                 for r in img.get("recommendations", []):
-                    if r.get("estimated_cost", 0) == 0:
-                        approved.add(r["type"])
+                    if r["type"] == "upscale":
+                        approved.add("upscale")
                 img["approved_edits"] = list(approved)
             _auto_save()
             st.rerun()
     with col4:
-        if st.button("❌ Clear all approvals", use_container_width=True):
+        if st.button("Clear all selections", use_container_width=True):
             for img in images:
                 img["approved_edits"] = []
             _auto_save()
             st.rerun()
 
-    # Cost summary + apply
+    # Apply section
     n_approved = sum(1 for img in images if img.get("approved_edits"))
     total_cost = estimate_total_edit_cost(images)
+    analysis_cost = estimate_analysis_cost(manifest.get("token_usage", {}))
 
     st.divider()
-    st.subheader("Apply Edits")
+    st.subheader("Apply selected edits")
 
     if n_approved == 0:
-        st.info("Approve at least one edit above to continue.")
+        st.info("Select at least one edit above, then click Apply.")
     else:
         free_count = sum(
-            1 for img in images
-            for r in img.get("recommendations", [])
+            1 for img in images for r in img.get("recommendations", [])
             if r["type"] in img.get("approved_edits", []) and r.get("estimated_cost", 0) == 0
         )
         paid_count = sum(
-            1 for img in images
-            for r in img.get("recommendations", [])
+            1 for img in images for r in img.get("recommendations", [])
             if r["type"] in img.get("approved_edits", []) and r.get("estimated_cost", 0) > 0
         )
 
         st.write(
-            f"**{n_approved} image(s)** with approved edits. "
-            f"{free_count} free edit(s), {paid_count} paid edit(s). "
-            f"**Estimated cost: ${total_cost:.2f}**"
+            f"**{n_approved} image(s)** selected — "
+            f"{free_count} free, {paid_count} paid. "
+            f"**Estimated edit cost: ${total_cost:.2f}**"
+        )
+        if total_cost > 0:
+            st.caption(f"Analysis cost was ${analysis_cost:.4f}.")
+
+        st.caption(
+            "Files will be renamed based on AI description "
+            "(e.g. `Profile Photo - Pool Resort.jpg`). "
+            "Originals remain untouched."
         )
 
-        if total_cost > 0:
-            st.caption(f"Analysis cost was ${analysis_cost:.4f}. "
-                       f"Edit cost will be ~${total_cost:.2f} on top of that.")
-
-        if st.button(
-            f"Apply {n_approved} edit(s) →" + (f" (${total_cost:.2f})" if total_cost > 0 else " (free)"),
-            type="primary",
-            use_container_width=True,
-        ):
+        label = f"Apply {n_approved} edit(s)"
+        label += f" — ${total_cost:.2f}" if total_cost > 0 else " — free"
+        if st.button(label + " →", type="primary", use_container_width=True):
             _auto_save()
             st.session_state.processing = True
             st.rerun()
 
+
+# ── Image grid ────────────────────────────────────────────────────────────────
 
 def _render_grid(images: list[dict], tab_key: str):
     if not images:
         st.caption("No images in this category.")
         return
 
+    all_images = st.session_state.get("images", [])
+    idx_map: dict[str, int] = {}
+    for i, img in enumerate(all_images):
+        p = img.get("original_path", "")
+        if p and p not in idx_map:
+            idx_map[p] = i
+
     page_key = f"page_{tab_key}"
     page = st.session_state.get(page_key, 0)
-    total_pages = max(1, -(-len(images) // IMAGES_PER_PAGE))
+    total_pages = max(1, -(-len(images) // PER_PAGE))
     page = min(page, total_pages - 1)
-
-    start = page * IMAGES_PER_PAGE
-    page_images = images[start:start + IMAGES_PER_PAGE]
+    start = page * PER_PAGE
+    page_images = images[start:start + PER_PAGE]
 
     if total_pages > 1:
         pcol1, pcol2, pcol3 = st.columns([1, 2, 1])
@@ -698,55 +796,50 @@ def _render_grid(images: list[dict], tab_key: str):
         cols = st.columns(GRID_COLS)
         for i, img_data in enumerate(row):
             with cols[i]:
-                _render_card(img_data)
+                _render_card(img_data, tab_key, idx_map)
 
 
-def _render_card(img_data: dict):
+def _render_card(img_data: dict, tab_key: str, idx_map: dict[str, int]):
     recs = img_data.get("recommendations", [])
     approved = set(img_data.get("approved_edits", []))
     filename = img_data.get("filename", "?")
-    desc = img_data.get("description") or ""
-    quality = img_data.get("quality", "unknown")
-    meta = img_data.get("metadata", {})
+    suggested_name = img_data.get("suggested_name", "")
 
-    # Thumbnail
     p = Path(img_data.get("original_path", ""))
     if p.exists():
         try:
             from PIL import Image as PILImage
             thumb = PILImage.open(p)
-            thumb.thumbnail((256, 256))
+            thumb.thumbnail((200, 200))
             st.image(thumb, use_container_width=True)
+            thumb.close()
         except Exception:
             st.caption(f"[{filename}]")
     else:
         st.caption(f"[{filename}]")
 
-    # Filename
-    st.caption(filename[:30] + ("..." if len(filename) > 30 else ""))
+    display_name = filename if len(filename) <= 28 else filename[:25] + "..."
+    st.caption(display_name)
 
-    # Resolution + quality
-    if meta.get("width"):
-        st.caption(f"{meta['width']}×{meta['height']} · {quality}")
+    # Show suggested rename
+    if suggested_name:
+        output_name = build_output_name(img_data)
+        st.markdown(
+            f'<div class="rename-badge">→ {output_name}</div>',
+            unsafe_allow_html=True,
+        )
 
-    # Recommendations as checkboxes
-    if recs:
-        all_images = st.session_state.get("images", [])
-        try:
-            idx = next(
-                i for i, img in enumerate(all_images)
-                if img.get("original_path") == img_data.get("original_path")
-            )
-        except StopIteration:
-            idx = id(img_data)
-
+    # Checkboxes for actionable recommendations (rotation, upscale only)
+    actionable_recs = [r for r in recs if r["type"] in ("rotation", "upscale")]
+    if actionable_recs:
+        idx = idx_map.get(img_data.get("original_path", ""), id(img_data))
         changed = False
-        for rec in recs:
+        for rec in actionable_recs:
             icon = config.EDIT_TYPES.get(rec["type"], {}).get("icon", "")
-            cost_str = "" if rec.get("estimated_cost", 0) == 0 else f" (${rec['estimated_cost']:.2f})"
-            key = f"chk_{idx}_{rec['type']}"
+            cost_tag = "" if rec.get("estimated_cost", 0) == 0 else f" ${rec['estimated_cost']:.2f}"
+            key = f"chk_{tab_key}_{idx}_{rec['type']}"
             checked = st.checkbox(
-                f"{icon} {rec['label']}{cost_str}",
+                f"{icon} {rec['label']}{cost_tag}",
                 value=rec["type"] in approved,
                 key=key,
             )
@@ -761,32 +854,111 @@ def _render_card(img_data: dict):
             img_data["approved_edits"] = list(approved)
             _auto_save()
 
-    # Detail expander
-    with st.expander("Details"):
+    # Preview buttons
+    idx = idx_map.get(img_data.get("original_path", ""), id(img_data))
+    preview_col1, preview_col2 = st.columns(2)
+
+    has_rotation = any(r["type"] == "rotation" for r in recs)
+    has_upscale = any(r["type"] == "upscale" for r in recs)
+
+    if has_rotation:
+        with preview_col1:
+            rot_rec = next(r for r in recs if r["type"] == "rotation")
+            preview_key = f"prev_rot_{tab_key}_{idx}"
+            if st.button("Preview rotation", key=preview_key, use_container_width=True):
+                st.session_state[f"show_rot_preview_{idx}"] = True
+
+    if has_upscale:
+        with preview_col2 if has_rotation else preview_col1:
+            preview_key = f"prev_up_{tab_key}_{idx}"
+            if st.button("Preview upscale", key=preview_key, use_container_width=True):
+                st.session_state[f"show_up_preview_{idx}"] = True
+
+    # Show rotation preview if requested
+    if st.session_state.get(f"show_rot_preview_{idx}") and has_rotation:
+        rot_rec = next(r for r in recs if r["type"] == "rotation")
+        try:
+            preview_img = preview_rotation(p, rot_rec["params"]["degrees"])
+            st.image(preview_img, caption=f"Rotated {rot_rec['params']['degrees']}°", use_container_width=True)
+            preview_img.close()
+        except Exception as e:
+            st.error(f"Preview failed: {e}")
+
+    # Show upscale preview if requested
+    if st.session_state.get(f"show_up_preview_{idx}") and has_upscale:
+        preview_state_key = f"upscale_preview_path_{idx}"
+        if preview_state_key not in st.session_state:
+            with st.spinner("Generating upscale preview (API call)..."):
+                try:
+                    preview_path = preview_upscale(p)
+                    st.session_state[preview_state_key] = str(preview_path)
+                except Exception as e:
+                    st.error(f"Upscale preview failed: {e}")
+                    st.session_state[preview_state_key] = None
+
+        preview_path = st.session_state.get(preview_state_key)
+        if preview_path and Path(preview_path).exists():
+            from PIL import Image as PILImage
+            prev_img = PILImage.open(preview_path)
+            st.image(prev_img, caption="Upscaled preview", use_container_width=True)
+            prev_img.close()
+
+    # Filter recommendations (display only, not actionable)
+    filter_recs = img_data.get("filter_recommendations", [])
+    if filter_recs:
+        st.markdown("**✨ Recommended filters:**")
+        for fr in filter_recs:
+            filt = fr.get("filter", {})
+            reason = fr.get("match_reason", "")
+            st.markdown(
+                f'<div class="filter-rec">'
+                f'<strong>{filt.get("name", "?")}</strong> '
+                f'<em>({filt.get("category", "")})</em><br>'
+                f'<small>{filt.get("description", "")}</small><br>'
+                f'<small style="color:#56a0f5">Why: {reason}</small>'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
+
+    # Collapsible details
+    with st.expander("Details", expanded=False):
+        desc = img_data.get("description") or ""
+        meta = img_data.get("metadata", {})
+        quality = img_data.get("quality", "unknown")
+
         if desc:
             st.write(desc)
+        if meta.get("width"):
+            st.caption(f"{meta['width']}×{meta['height']} · Quality: {quality}")
 
         analysis = img_data.get("analysis", {})
 
+        scene = analysis.get("scene", {})
+        if scene:
+            st.write(f"**Setting:** {scene.get('setting', '?')}")
+            st.write(f"**Lighting:** {scene.get('lighting', '?')}")
+            colors = scene.get("dominant_colors", [])
+            if colors:
+                st.write(f"**Colors:** {', '.join(colors)}")
+            st.write(f"**Mood:** {scene.get('mood', '?')}")
+
+        quality_info = analysis.get("quality", {})
+        if quality_info:
+            issues = quality_info.get("issues", [])
+            if issues:
+                st.write(f"**Issues:** {', '.join(issues)}")
+
         orientation = analysis.get("orientation", {})
         if not orientation.get("is_correct", True):
-            st.write(f"**Orientation:** Needs {orientation.get('rotation_needed_degrees', 0)}° rotation")
-        else:
-            st.write("**Orientation:** Correct")
-
-        filters = analysis.get("filters", {})
-        if filters.get("assessment"):
-            st.write(f"**Quality:** {filters.get('overall_quality', '?')} — {filters['assessment']}")
-
-        if filters.get("suggestions"):
-            for s in filters["suggestions"]:
-                st.caption(f"• {s.get('type', 'edit')}: {s.get('description', '')}")
+            st.write(f"**Orientation:** needs {orientation.get('rotation_needed_degrees', 0)}° rotation")
 
 
-# ── SCREEN: Processing ────────────────────────────────────────────────────────
+# ── SCREEN 4: Processing ─────────────────────────────────────────────────────
 
 def _screen_processing():
-    st.title("Applying Edits...")
+    _step_bar(4)
+    st.title("Applying edits...")
+    st.caption("Originals are never modified. All edits create copies.")
 
     images = st.session_state.get("images", [])
     to_process = [img for img in images if img.get("approved_edits")]
@@ -798,10 +970,9 @@ def _screen_processing():
         return
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-
     total = len(to_process)
-    st.write(f"Applying approved edits to **{total}** image(s). "
-             f"Output goes to `{config.OUTPUT_DIR}`.")
+
+    st.write(f"Applying edits to **{total}** image(s). Output: `{config.OUTPUT_DIR}`")
 
     progress_bar = st.progress(0.0)
     status_text = st.empty()
@@ -811,8 +982,9 @@ def _screen_processing():
     total_cost = 0.0
 
     for i, img_data in enumerate(to_process):
-        edits = ", ".join(img_data["approved_edits"])
-        status_text.write(f"{i + 1}/{total} — {img_data['filename']} ({edits})")
+        edits_str = ", ".join(img_data["approved_edits"])
+        output_name = build_output_name(img_data)
+        status_text.write(f"{i + 1}/{total} — {img_data['filename']} → {output_name} ({edits_str})")
         progress_bar.progress((i + 1) / total, text=f"{i + 1} / {total}")
 
         try:
@@ -824,6 +996,7 @@ def _screen_processing():
         except Exception as e:
             edit_results.append({
                 "filename": img_data["filename"],
+                "output_name": build_output_name(img_data),
                 "original_path": img_data.get("original_path", ""),
                 "errors": [{"type": "general", "error": str(e)}],
                 "edits_applied": [],
@@ -831,27 +1004,37 @@ def _screen_processing():
             })
 
     progress_bar.progress(1.0, text="Done!")
-    status_text.success(f"Applied edits to {total} image(s).")
+    status_text.success(f"Processed {total} image(s).")
 
     manifest = st.session_state.get("manifest") or {}
     run_id = manifest.get("run_id", "unknown")
     results_path = RUNS_DIR / f"{run_id}_edit_results.json"
-    with open(results_path, "w", encoding="utf-8") as f:
-        json.dump(edit_results, f, indent=2)
+    try:
+        with open(results_path, "w", encoding="utf-8") as f:
+            json.dump(edit_results, f, indent=2)
+    except OSError:
+        pass
 
     st.session_state.edit_results = edit_results
+    st.session_state.edit_complete = True
     st.session_state.processing = False
 
-    if st.button("View Results →", type="primary", use_container_width=True):
+    if st.button("View results →", type="primary", use_container_width=True):
         st.rerun()
 
 
-# ── SCREEN: Complete ──────────────────────────────────────────────────────────
+# ── SCREEN 5: Complete ────────────────────────────────────────────────────────
 
 def _screen_complete():
     edit_results = st.session_state.get("edit_results", [])
 
-    st.title("Complete")
+    _step_bar(5)
+    st.title("Done!")
+
+    st.info(
+        "All edits were applied to **copies**. Your original files "
+        "in `to_process/` are unchanged."
+    )
 
     total_edits = sum(len(r.get("edits_applied", [])) for r in edit_results)
     total_errors = sum(len(r.get("errors", [])) for r in edit_results)
@@ -861,58 +1044,76 @@ def _screen_complete():
     images_with_output = sum(1 for r in edit_results if r.get("output_path"))
 
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Images Edited", images_with_output)
-    c2.metric("Edits Applied", total_edits)
+    c1.metric("Images edited", images_with_output)
+    c2.metric("Edits applied", total_edits)
     c3.metric("Errors", total_errors)
-    c4.metric("Edit Cost", f"${total_cost:.2f}")
+    c4.metric("Edit cost", f"${total_cost:.2f}")
 
-    st.success(f"Edited images saved to `{config.OUTPUT_DIR}`.")
+    if images_with_output > 0:
+        st.success(f"Edited images saved to `{config.OUTPUT_DIR}`.")
+    if total_errors > 0:
+        st.warning(f"{total_errors} edit(s) failed. See details below.")
+
+    # Remaining images info
+    total_in_folder = _count_images(INPUT_DIR)
+    analyzed = len(st.session_state.get("images", []))
+    if analyzed < total_in_folder:
+        remaining = total_in_folder - analyzed
+        st.info(
+            f"**{remaining}** images remain unprocessed in `to_process/`. "
+            f"Go back to the dashboard to analyze the next batch."
+        )
 
     st.divider()
-    st.subheader("Per-Image Results")
+    st.subheader("Per-image results")
 
     for result in edit_results:
         fname = result.get("filename", "unknown")
+        output_name = result.get("output_name", fname)
         edits = result.get("edits_applied", [])
         errors = result.get("errors", [])
         output = result.get("output_path")
 
         icon = "✅" if output and not errors else "⚠️" if errors else "—"
-        with st.expander(f"{icon} {fname} — {len(edits)} edit(s)"):
+        with st.expander(f"{icon} {fname} → {output_name} — {len(edits)} edit(s)"):
             if output and Path(output).exists():
                 col1, col2 = st.columns(2)
                 with col1:
-                    st.caption("Original")
+                    st.caption("Original (unchanged)")
                     orig = Path(result.get("original_path", ""))
                     if orig.exists():
                         try:
                             from PIL import Image as PILImage
-                            st.image(PILImage.open(orig), use_container_width=True)
+                            img = PILImage.open(orig)
+                            st.image(img, use_container_width=True)
+                            img.close()
                         except Exception:
                             st.caption("Could not load")
                 with col2:
-                    st.caption("Edited")
+                    st.caption(f"Edited copy: {output_name}")
                     try:
                         from PIL import Image as PILImage
-                        st.image(PILImage.open(output), use_container_width=True)
+                        img = PILImage.open(output)
+                        st.image(img, use_container_width=True)
+                        img.close()
                     except Exception:
                         st.caption("Could not load")
 
             for edit in edits:
                 st.write(f"• **{edit['type'].title()}** — ${edit.get('cost', 0):.2f}")
-
             for err in errors:
                 st.error(f"{err.get('type', 'error')}: {err.get('error', 'unknown')}")
 
     st.divider()
     c1, c2 = st.columns(2)
     with c1:
-        if st.button("Start New Project", use_container_width=True):
+        if st.button("Start new batch", use_container_width=True, type="primary"):
             for k in list(st.session_state.keys()):
                 del st.session_state[k]
             st.rerun()
     with c2:
-        if st.button("← Back to Review", use_container_width=True):
+        if st.button("← Back to review", use_container_width=True):
+            st.session_state.pop("edit_complete", None)
             st.session_state.pop("edit_results", None)
             st.rerun()
 
