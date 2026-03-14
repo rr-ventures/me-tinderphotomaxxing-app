@@ -42,6 +42,40 @@ def _find_photo(photo_id: str) -> Path | None:
     return None
 
 
+def _sanitize_preset_name(name: str) -> str:
+    """Turn a preset name like 'Adaptive: Subject > Pop' into 'Adaptive_Subject_Pop'."""
+    cleaned = "".join(c if c.isalnum() or c in " _" else " " for c in name)
+    return "_".join(part for part in cleaned.split() if part)
+
+
+def _get_preset_filename(photo_id: str, run_id: str | None) -> str | None:
+    """Look up the top preset recommendation for a photo from a run and return a sanitized filename."""
+    import json
+    if not run_id:
+        return None
+    run_path = config.RUNS_DIR / f"{run_id}.json"
+    if not run_path.exists():
+        return None
+    with open(run_path, "r") as f:
+        run_data = json.load(f)
+    for r in run_data.get("results", []):
+        if r.get("image_id") == photo_id:
+            rec = r.get("preset_recommendation")
+            if rec and rec.get("preset", {}).get("name"):
+                return _sanitize_preset_name(rec["preset"]["name"])
+    return None
+
+
+def _unique_path(directory: Path, stem: str, suffix: str = ".jpg") -> Path:
+    """Return a unique file path, appending _2, _3, etc. if the name already exists."""
+    out = directory / f"{stem}{suffix}"
+    counter = 2
+    while out.exists():
+        out = directory / f"{stem}_{counter}{suffix}"
+        counter += 1
+    return out
+
+
 MEDIA_TYPES = {
     ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
     ".png": "image/png", ".webp": "image/webp",
@@ -449,6 +483,8 @@ class ProcessPhotoRequest(BaseModel):
     adjustments: Optional[dict] = None
     upscale: bool = False
     output_filename: Optional[str] = None
+    rename_to_preset: bool = False
+    run_id: Optional[str] = None
 
 
 @router.post("/photos/{photo_id}/process")
@@ -488,12 +524,18 @@ async def process_photo(photo_id: str, req: ProcessPhotoRequest):
 
         config.OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
+        preset_stem = None
+        if req.rename_to_preset:
+            preset_stem = _get_preset_filename(photo_id, req.run_id)
+
         def _make_out_path(base_name: str) -> Path:
             if req.output_filename:
                 fn = req.output_filename
                 if not fn.lower().endswith(".jpg"):
                     fn += ".jpg"
                 return config.OUTPUT_DIR / fn
+            if preset_stem:
+                return _unique_path(config.OUTPUT_DIR, preset_stem)
             return config.OUTPUT_DIR / base_name
 
         if req.upscale:
@@ -681,9 +723,28 @@ async def batch_process(req: BatchProcessRequest):
     return {"results": results, "errors": errors}
 
 
+UPSCALE_PROMPTS = {
+    "clarity": (
+        "Increase the resolution and sharpness of this photo. "
+        "Focus only on improving pixel clarity, reducing blur and noise, "
+        "and adding fine detail. Do NOT change the lighting, colors, contrast, "
+        "mood, or style in any way. The result should look identical to the "
+        "original but with higher resolution and sharper detail."
+    ),
+    "enhance": (
+        "Upscale and enhance this photo to higher resolution. "
+        "Improve clarity, sharpness, and overall quality to make it look "
+        "like it was taken with a professional camera. You may subtly improve "
+        "lighting, color balance, and detail to achieve a polished, natural result. "
+        "Preserve the original composition, subject, and content."
+    ),
+}
+
+
 class UpscalePreviewRequest(BaseModel):
     crop: Optional[dict] = None
     adjustments: Optional[dict] = None
+    mode: Optional[str] = "enhance"
 
 
 @router.post("/photos/{photo_id}/upscale-preview")
@@ -691,12 +752,19 @@ async def upscale_preview(photo_id: str, req: UpscalePreviewRequest = None):
     """
     Upscale a photo (with optional crop/adjustments applied first) and return
     the result as JPEG bytes for preview. Does NOT save to disk.
+
+    mode: "clarity" (resolution only) or "enhance" (full AI enhancement)
     """
     from fastapi.responses import Response as RawResponse
 
     path = _find_photo(photo_id)
     if not path or not path.exists():
         raise HTTPException(status_code=404, detail="Photo not found")
+
+    mode = (req.mode if req and req.mode else "enhance")
+    if mode not in UPSCALE_PROMPTS:
+        mode = "enhance"
+    prompt = UPSCALE_PROMPTS[mode]
 
     try:
         img = Image.open(path)
@@ -733,32 +801,49 @@ async def upscale_preview(photo_id: str, req: UpscalePreviewRequest = None):
                 role="user",
                 parts=[
                     types.Part.from_bytes(data=buf.getvalue(), mime_type="image/jpeg"),
-                    types.Part.from_text(
-                        text="Upscale and enhance this photo to higher resolution. "
-                        "Preserve all details, colors, and composition exactly."
-                    ),
+                    types.Part.from_text(text=prompt),
                 ],
             )],
             config=types.GenerateContentConfig(response_modalities=["IMAGE", "TEXT"]),
         )
 
+        if not response.candidates:
+            block_reason = getattr(response, 'prompt_feedback', None)
+            detail = f"Gemini returned no candidates. Model: {config.EDIT_MODEL}, mode: {mode}"
+            if block_reason:
+                detail += f", feedback: {block_reason}"
+            raise HTTPException(status_code=500, detail=detail)
+
+        candidate = response.candidates[0]
+        finish_reason = getattr(candidate, 'finish_reason', None)
+
         image_data = None
+        text_parts = []
         try:
-            for part in response.candidates[0].content.parts:
+            for part in candidate.content.parts:
                 if hasattr(part, "inline_data") and part.inline_data:
                     image_data = part.inline_data.data
-                    break
+                elif hasattr(part, "text") and part.text:
+                    text_parts.append(part.text)
         except (IndexError, AttributeError):
             pass
 
         if not image_data:
-            raise HTTPException(status_code=500, detail="Upscale API returned no image")
+            detail = f"Gemini returned no image. Model: {config.EDIT_MODEL}, mode: {mode}, finish_reason: {finish_reason}"
+            if text_parts:
+                detail += f", text response: {' '.join(text_parts)[:300]}"
+            raise HTTPException(status_code=500, detail=detail)
 
         return RawResponse(content=image_data, media_type="image/jpeg")
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Upscale preview failed: {e}")
+        import traceback
+        tb = traceback.format_exc()
+        raise HTTPException(
+            status_code=500,
+            detail=f"Upscale preview failed ({config.EDIT_MODEL}, mode={mode}): {e}\n{tb[-500:]}"
+        )
 
 
 @router.get("/photos/{photo_id}/crop-recommendation")
@@ -798,11 +883,10 @@ async def get_crop_recommendation_endpoint(photo_id: str, run_id: str = None):
 @router.get("/photos/{photo_id}/preset-recommendation")
 async def get_preset_recommendation(photo_id: str, run_id: str = None):
     """
-    Return the preset recommendation for a photo based on its analysis metadata.
-    Needs the run_id to look up metadata, or metadata can be passed.
+    Return the top 3 preset recommendations for a photo based on its analysis metadata.
     """
     import json
-    from backend.analysis.preset_matcher import get_recommendation, get_danger_zones
+    from backend.analysis.preset_matcher import get_recommendations, get_danger_zones
 
     path = _find_photo(photo_id)
     if not path or not path.exists():
@@ -819,12 +903,13 @@ async def get_preset_recommendation(photo_id: str, run_id: str = None):
                     metadata = r.get("metadata")
                     break
 
-    rec = get_recommendation(metadata or {})
+    recs = get_recommendations(metadata or {}, max_results=3)
     dangers = get_danger_zones()
 
     return {
         "photo_id": photo_id,
-        "recommendation": rec,
+        "recommendation": recs[0] if recs else None,
+        "recommendations": recs,
         "danger_zones": dangers,
     }
 
@@ -842,4 +927,198 @@ async def list_processed():
         "files": [{"filename": f.name, "size_kb": round(f.stat().st_size / 1024, 1)} for f in files],
         "total": len(files),
         "folder": str(config.OUTPUT_DIR),
+    }
+
+
+class BatchRenameRequest(BaseModel):
+    photo_ids: list[str]
+    run_id: str
+
+
+@router.post("/photos/batch-rename")
+async def batch_rename(req: BatchRenameRequest):
+    """Copy photos to processed/ renamed to their top recommended preset name."""
+    results = []
+    errors = []
+
+    for pid in req.photo_ids:
+        path = _find_photo(pid)
+        if not path or not path.exists():
+            errors.append({"photo_id": pid, "error": "Photo not found"})
+            continue
+
+        preset_stem = _get_preset_filename(pid, req.run_id)
+        if not preset_stem:
+            errors.append({"photo_id": pid, "error": "No preset recommendation found"})
+            continue
+
+        try:
+            img = Image.open(path)
+            img = fix_orientation(img)
+            img = img.convert("RGB")
+
+            config.OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+            out_path = _unique_path(config.OUTPUT_DIR, preset_stem)
+            img.save(str(out_path), format="JPEG", quality=95)
+            img.close()
+
+            results.append({
+                "photo_id": pid,
+                "original_filename": path.name,
+                "output_filename": out_path.name,
+                "preset_name": preset_stem.replace("_", " "),
+                "status": "ok",
+            })
+        except Exception as e:
+            errors.append({"photo_id": pid, "error": str(e)})
+
+    return {
+        "results": results,
+        "errors": errors,
+        "total_renamed": len(results),
+        "total_errors": len(errors),
+    }
+
+
+class BatchEnhanceRequest(BaseModel):
+    photo_ids: list[str]
+    run_id: Optional[str] = None
+    crop: bool = False
+    upscale: bool = False
+    upscale_mode: str = "enhance"
+    save: bool = False
+    rename_to_preset: bool = False
+
+
+@router.post("/photos/batch-enhance")
+async def batch_enhance(req: BatchEnhanceRequest):
+    """
+    Full-pipeline batch processing: for each photo, apply its best recommended
+    crop and/or AI upscale, then save to processed/.
+    """
+    import json
+    from backend.analysis.crop_matcher import get_crop_options
+
+    metadata_map = {}
+    if req.run_id:
+        run_path = config.RUNS_DIR / f"{req.run_id}.json"
+        if run_path.exists():
+            with open(run_path, "r") as f:
+                run_data = json.load(f)
+            for r in run_data.get("results", []):
+                metadata_map[r.get("image_id")] = r.get("metadata", {})
+
+    upscale_mode = req.upscale_mode if req.upscale_mode in UPSCALE_PROMPTS else "enhance"
+    prompt = UPSCALE_PROMPTS[upscale_mode]
+
+    results = []
+    errors = []
+
+    for pid in req.photo_ids:
+        path = _find_photo(pid)
+        if not path or not path.exists():
+            errors.append({"photo_id": pid, "error": "Photo not found"})
+            continue
+
+        try:
+            img = Image.open(path)
+            img = fix_orientation(img)
+            img = img.convert("RGB")
+            ops = []
+
+            if req.crop:
+                metadata = metadata_map.get(pid, {})
+                crop_opts = get_crop_options(
+                    metadata,
+                    img_width=img.width,
+                    img_height=img.height,
+                    max_options=1,
+                )
+                if crop_opts:
+                    c = crop_opts[0]["crop"]
+                    img = crop_image(img, c["x"], c["y"], c["w"], c["h"])
+                    ops.append("cropped")
+
+            config.OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+            preset_stem = None
+            if req.rename_to_preset:
+                preset_stem = _get_preset_filename(pid, req.run_id)
+
+            def _batch_out_path(fallback_name: str) -> Path:
+                if preset_stem:
+                    return _unique_path(config.OUTPUT_DIR, preset_stem)
+                return config.OUTPUT_DIR / fallback_name
+
+            if req.upscale:
+                buf = io.BytesIO()
+                img.save(buf, format="JPEG", quality=95)
+                img.close()
+
+                from google import genai
+                from google.genai import types
+
+                api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+                if not api_key:
+                    errors.append({"photo_id": pid, "error": "No API key"})
+                    continue
+
+                client = genai.Client(api_key=api_key)
+                response = client.models.generate_content(
+                    model=config.EDIT_MODEL,
+                    contents=[types.Content(
+                        role="user",
+                        parts=[
+                            types.Part.from_bytes(data=buf.getvalue(), mime_type="image/jpeg"),
+                            types.Part.from_text(text=prompt),
+                        ],
+                    )],
+                    config=types.GenerateContentConfig(response_modalities=["IMAGE", "TEXT"]),
+                )
+
+                image_data = None
+                try:
+                    for part in response.candidates[0].content.parts:
+                        if hasattr(part, "inline_data") and part.inline_data:
+                            image_data = part.inline_data.data
+                            break
+                except (IndexError, AttributeError):
+                    pass
+
+                if not image_data:
+                    errors.append({"photo_id": pid, "error": "Upscale API returned no image"})
+                    continue
+
+                ops.append("enhanced")
+                suffix = "_".join(ops)
+                out_path = _batch_out_path(f"{path.stem}_{suffix}.jpg")
+                with open(out_path, "wb") as f:
+                    f.write(image_data)
+            elif req.save or req.crop:
+                suffix = "_".join(ops) if ops else "processed"
+                out_path = _batch_out_path(f"{path.stem}_{suffix}.jpg")
+                img.save(str(out_path), format="JPEG", quality=95)
+                img.close()
+                if req.save:
+                    ops.append("saved")
+            else:
+                img.close()
+                out_path = None
+
+            results.append({
+                "photo_id": pid,
+                "filename": path.name,
+                "output": out_path.name if out_path else None,
+                "operations": ops,
+                "status": "ok",
+            })
+
+        except Exception as e:
+            errors.append({"photo_id": pid, "error": str(e)})
+
+    return {
+        "results": results,
+        "errors": errors,
+        "total_processed": len(results),
+        "total_errors": len(errors),
     }

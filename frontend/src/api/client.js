@@ -121,6 +121,25 @@ export async function batchProcess(photoIds, actions) {
   return postJson('/photos/batch-process', { photo_ids: photoIds, actions })
 }
 
+export async function batchEnhance(photoIds, { runId, crop, upscale, upscaleMode, save, renameToPreset } = {}) {
+  return postJson('/photos/batch-enhance', {
+    photo_ids: photoIds,
+    run_id: runId || null,
+    crop: !!crop,
+    upscale: !!upscale,
+    upscale_mode: upscaleMode || 'enhance',
+    save: !!save,
+    rename_to_preset: !!renameToPreset,
+  })
+}
+
+export async function batchRename(photoIds, runId) {
+  return postJson('/photos/batch-rename', {
+    photo_ids: photoIds,
+    run_id: runId,
+  })
+}
+
 export async function getPresetRecommendation(photoId, runId) {
   const params = runId ? `?run_id=${runId}` : ''
   return get(`/photos/${photoId}/preset-recommendation${params}`)
@@ -131,11 +150,15 @@ export async function getCropOptions(photoId, runId) {
   return get(`/photos/${photoId}/crop-recommendation${params}`)
 }
 
-export async function upscalePreviewUrl(photoId, { crop, adjustments } = {}) {
+export async function upscalePreviewUrl(photoId, { crop, adjustments, mode } = {}) {
   const response = await fetch(`${API_BASE}/photos/${photoId}/upscale-preview`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ crop: crop || null, adjustments: adjustments || null }),
+    body: JSON.stringify({
+      crop: crop || null,
+      adjustments: adjustments || null,
+      mode: mode || 'enhance',
+    }),
   })
   if (!response.ok) {
     const error = await response.json().catch(() => ({ detail: response.statusText }))

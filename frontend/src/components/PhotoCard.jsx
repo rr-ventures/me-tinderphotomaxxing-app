@@ -1,9 +1,17 @@
-function PhotoCard({ photo, result, onClick }) {
+function PhotoCard({ photo, result, onClick, selectable, selected, onSelect }) {
   const hasIssues = photo.needs_rotation || photo.needs_upscale
   const presetName = result?.preset_recommendation?.preset?.name
 
+  function handleCheckboxClick(e) {
+    e.stopPropagation()
+    onSelect?.(photo.id)
+  }
+
   return (
-    <div className="photo-card" onClick={onClick}>
+    <div
+      className={`photo-card ${selected ? 'photo-card-selected' : ''}`}
+      onClick={onClick}
+    >
       <div className="photo-card-image">
         {photo.thumbnail_url ? (
           <img
@@ -13,6 +21,16 @@ function PhotoCard({ photo, result, onClick }) {
           />
         ) : (
           <div className="photo-placeholder">No preview</div>
+        )}
+
+        {selectable && (
+          <div className="photo-card-checkbox" onClick={handleCheckboxClick}>
+            <input
+              type="checkbox"
+              checked={!!selected}
+              readOnly
+            />
+          </div>
         )}
 
         <div className="photo-card-overlay">

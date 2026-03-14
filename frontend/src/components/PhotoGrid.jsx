@@ -1,30 +1,9 @@
-/*
- * LEARNING NOTE: PhotoGrid — displays a grid of photo thumbnails.
- *
- * PYTHON COMPARISON:
- *   In Streamlit: cols = st.columns(4); for i, img in enumerate(images): ...
- *   In React: we use CSS Grid + map() to render each photo as a card.
- *
- * WHAT'S map()?
- *   JavaScript's map() is like Python's list comprehension:
- *   Python:  [render_card(photo) for photo in photos]
- *   JS:     photos.map(photo => <PhotoCard ... />)
- *
- * WHAT'S A "KEY"?
- *   When rendering a list, React needs a unique "key" for each item
- *   so it can efficiently update only the items that changed.
- *   It's like giving each item a name tag.
- *
- * PERFORMANCE:
- *   For 500+ photos, we only render what's visible on screen.
- *   As you scroll down, more photos load. This is called "pagination."
- */
 import { useState } from 'react'
 import PhotoCard from './PhotoCard'
 
 const PHOTOS_PER_PAGE = 48
 
-function PhotoGrid({ photos, results, onPhotoClick }) {
+function PhotoGrid({ photos, results, onPhotoClick, selectable, selectedIds, onSelect }) {
   const [page, setPage] = useState(0)
 
   if (!photos || photos.length === 0) {
@@ -35,7 +14,6 @@ function PhotoGrid({ photos, results, onPhotoClick }) {
   const startIdx = page * PHOTOS_PER_PAGE
   const visiblePhotos = photos.slice(startIdx, startIdx + PHOTOS_PER_PAGE)
 
-  // Build a lookup map: photo_id -> analysis result (if available)
   const resultMap = {}
   if (results) {
     results.forEach(r => { resultMap[r.image_id] = r })
@@ -43,7 +21,6 @@ function PhotoGrid({ photos, results, onPhotoClick }) {
 
   return (
     <div>
-      {/* Photo count and pagination */}
       <div className="grid-header">
         <span className="photo-count">{photos.length} photos</span>
         {totalPages > 1 && (
@@ -69,7 +46,6 @@ function PhotoGrid({ photos, results, onPhotoClick }) {
         )}
       </div>
 
-      {/* The actual grid of photo cards */}
       <div className="photo-grid">
         {visiblePhotos.map(photo => (
           <PhotoCard
@@ -77,6 +53,9 @@ function PhotoGrid({ photos, results, onPhotoClick }) {
             photo={photo}
             result={resultMap[photo.id]}
             onClick={() => onPhotoClick && onPhotoClick(photo, resultMap[photo.id])}
+            selectable={selectable}
+            selected={selectedIds?.has(photo.id)}
+            onSelect={onSelect}
           />
         ))}
       </div>

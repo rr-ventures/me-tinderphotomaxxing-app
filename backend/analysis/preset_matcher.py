@@ -29,11 +29,17 @@ def reload():
     return _load()
 
 
-def _matches(conditions: dict, metadata: dict) -> int:
-    """Return match score (higher = more specific match). 0 = no match."""
+def _matches(conditions: dict, metadata: dict) -> tuple[int, int]:
+    """
+    Return (match_score, penalty).
+    match_score = number of conditions satisfied.
+    penalty = number of conditions that actively contradicted the metadata.
+    A scenario with 0 penalties is 'compatible' even if score is 0 (metadata was sparse).
+    """
     if not conditions:
-        return 0
+        return (0, 0)
     score = 0
+    penalty = 0
     for key, expected in conditions.items():
         actual = metadata.get(key)
         if actual is None:
@@ -43,45 +49,68 @@ def _matches(conditions: dict, metadata: dict) -> int:
                 if actual >= expected[0] and actual <= expected[-1]:
                     score += 1
                 else:
-                    return 0
+                    penalty += 1
             elif actual in expected:
                 score += 1
             else:
-                return 0
+                penalty += 1
         else:
             if actual == expected:
                 score += 1
             else:
-                return 0
-    return score
+                penalty += 1
+    return (score, penalty)
 
 
 def get_recommendation(metadata: dict) -> dict | None:
+    """Legacy single-result wrapper."""
+    results = get_recommendations(metadata, max_results=1)
+    return results[0] if results else None
+
+
+def get_recommendations(metadata: dict, max_results: int = 3) -> list[dict]:
     """
-    Given photo metadata, find the best matching preset recommendation.
-    Returns the scenario dict with preset info, or None.
+    Return the top N distinct preset recommendations for a photo.
+    Deduplicates by preset name so the user sees genuinely different options.
+
+    Scoring: scenarios are sorted by (match_score DESC, penalty ASC) so that
+    strong matches come first, and compatible-but-unconfirmed scenarios fill
+    remaining slots (rather than returning only 1 result).
     """
     data = _load()
     scenarios = data.get("scenarios", [])
 
-    best = None
-    best_score = 0
-
+    scored = []
     for scenario in scenarios:
         conditions = scenario.get("conditions", {})
-        score = _matches(conditions, metadata)
-        if score > best_score:
-            best_score = score
-            best = scenario
+        match_score, penalty = _matches(conditions, metadata)
+        scored.append((match_score, penalty, scenario))
 
-    if best and best_score > 0:
-        return best
+    scored.sort(key=lambda x: (-x[0], x[1]))
 
-    fallback = next(
-        (s for s in scenarios if s.get("id") == "outdoor_overcast"),
-        scenarios[0] if scenarios else None,
-    )
-    return fallback
+    results = []
+    seen_presets = set()
+
+    for match_score, penalty, scenario in scored:
+        if penalty > 0:
+            continue
+        preset_name = scenario.get("preset", {}).get("name", "")
+        if preset_name in seen_presets:
+            continue
+        seen_presets.add(preset_name)
+        results.append(scenario)
+        if len(results) >= max_results:
+            break
+
+    if not results:
+        fallback = next(
+            (s for s in scenarios if s.get("id") == "outdoor_overcast"),
+            scenarios[0] if scenarios else None,
+        )
+        if fallback:
+            results.append(fallback)
+
+    return results
 
 
 def get_danger_zones() -> list:

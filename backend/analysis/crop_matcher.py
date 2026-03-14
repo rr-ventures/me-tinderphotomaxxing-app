@@ -140,27 +140,22 @@ def get_crop_options(
     scored.sort(key=lambda x: x[0], reverse=True)
 
     options = []
-    seen_keys = set()
+    seen_coords = set()
 
     for score, scenario in scored:
-        crop_spec = scenario.get("crop", {})
-        key = (
-            crop_spec.get("aspect_ratio", 0.8),
-            crop_spec.get("focus", "center"),
-            crop_spec.get("padding_pct", 10),
-        )
-        if key in seen_keys:
-            continue
-        seen_keys.add(key)
-
         option = _build_option(scenario, img_width, img_height, len(options) + 1)
 
-        is_no_op = (
-            option["crop"]["x"] == 0
-            and option["crop"]["y"] == 0
-            and option["crop"]["w"] == 100
-            and option["crop"]["h"] == 100
+        coord_key = (
+            option["crop"]["x"],
+            option["crop"]["y"],
+            option["crop"]["w"],
+            option["crop"]["h"],
         )
+        if coord_key in seen_coords:
+            continue
+        seen_coords.add(coord_key)
+
+        is_no_op = coord_key == (0, 0, 100, 100)
         if is_no_op and len(options) > 0:
             continue
 

@@ -1,6 +1,6 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useMemo } from 'react'
 import { useParams, Link } from 'react-router-dom'
-import { getRun, listPhotos, batchProcess } from '../api/client'
+import { getRun, listPhotos, batchEnhance, batchRename } from '../api/client'
 import PhotoGrid from '../components/PhotoGrid'
 import PhotoDetail from '../components/PhotoDetail'
 
@@ -14,9 +14,12 @@ function Analysis() {
   const [selectedResult, setSelectedResult] = useState(null)
 
   const [selectedIds, setSelectedIds] = useState(new Set())
-  const [batchActions, setBatchActions] = useState({ rotate: true, upscale: true, save: false })
-  const [batchRunning, setBatchRunning] = useState(false)
-  const [batchStatus, setBatchStatus] = useState(null)
+  const [shortlistIds, setShortlistIds] = useState(new Set())
+  const [activeTab, setActiveTab] = useState('all')
+
+  const [bulkRunning, setBulkRunning] = useState(false)
+  const [bulkProgress, setBulkProgress] = useState(null)
+  const [bulkStatus, setBulkStatus] = useState(null)
 
   useEffect(() => {
     async function load() {
@@ -37,12 +40,41 @@ function Analysis() {
     load()
   }, [runId])
 
+  useEffect(() => {
+    setSelectedIds(new Set())
+    setBulkStatus(null)
+  }, [activeTab])
+
+  const results = run?.results || []
+  const runErrors = run?.errors || []
+
+  const analyzedPhotos = useMemo(() => {
+    const ids = new Set(results.map(r => r.image_id))
+    return photos.filter(p => ids.has(p.id))
+  }, [photos, results])
+
+  const shortlistPhotos = useMemo(
+    () => analyzedPhotos.filter(p => shortlistIds.has(p.id)),
+    [analyzedPhotos, shortlistIds]
+  )
+
+  const displayPhotos = activeTab === 'shortlist' ? shortlistPhotos : analyzedPhotos
+
+  const presetCounts = useMemo(() => {
+    const counts = {}
+    results.forEach(r => {
+      const preset = r.preset_recommendation?.preset?.name || 'No recommendation'
+      counts[preset] = (counts[preset] || 0) + 1
+    })
+    return counts
+  }, [results])
+
   function handlePhotoClick(photo, result) {
     setSelectedPhoto(photo)
     setSelectedResult(result)
   }
 
-  function togglePhotoSelection(photoId) {
+  function toggleSelection(photoId) {
     setSelectedIds(prev => {
       const next = new Set(prev)
       if (next.has(photoId)) next.delete(photoId)
@@ -51,40 +83,72 @@ function Analysis() {
     })
   }
 
-  function selectAllNeeding(type) {
-    const ids = photos
-      .filter(p => type === 'upscale' ? p.needs_upscale : p.needs_rotation)
-      .map(p => p.id)
-    setSelectedIds(new Set(ids))
+  function selectAll() {
+    setSelectedIds(new Set(displayPhotos.map(p => p.id)))
   }
 
   function selectNone() {
     setSelectedIds(new Set())
   }
 
-  async function handleBatchProcess() {
-    if (selectedIds.size === 0) return
-    setBatchRunning(true)
-    setBatchStatus(null)
+  function addToShortlist() {
+    setShortlistIds(prev => {
+      const next = new Set(prev)
+      selectedIds.forEach(id => next.add(id))
+      return next
+    })
+    setSelectedIds(new Set())
+    setActiveTab('shortlist')
+  }
+
+  function removeFromShortlist() {
+    setShortlistIds(prev => {
+      const next = new Set(prev)
+      selectedIds.forEach(id => next.delete(id))
+      return next
+    })
+    setSelectedIds(new Set())
+  }
+
+  async function handleBulkAction(action) {
+    const ids = [...selectedIds]
+    if (ids.length === 0) return
+
+    setBulkRunning(true)
+    setBulkStatus(null)
+    setBulkProgress(`Starting ${action} on ${ids.length} photos...`)
+
     try {
-      const actions = Object.entries(batchActions)
-        .filter(([, on]) => on)
-        .map(([action]) => action)
-      if (actions.length === 0) {
-        setBatchStatus({ type: 'error', message: 'Select at least one action' })
-        return
+      if (action === 'rename') {
+        const res = await batchRename(ids, runId)
+        const ok = res.total_renamed || 0
+        const errs = res.total_errors || 0
+        setBulkStatus({
+          type: errs > 0 ? 'warning' : 'success',
+          message: `${ok} photo${ok !== 1 ? 's' : ''} renamed to preset${errs > 0 ? `, ${errs} error${errs !== 1 ? 's' : ''}` : ''}.`,
+        })
+      } else {
+        const res = await batchEnhance(ids, {
+          runId,
+          crop: action === 'crop' || action === 'all',
+          upscale: action === 'enhance' || action === 'all',
+          upscaleMode: 'enhance',
+          save: action === 'save' || action === 'all',
+          renameToPreset: action === 'all',
+        })
+
+        const ok = res.total_processed || 0
+        const errs = res.total_errors || 0
+        setBulkStatus({
+          type: errs > 0 ? 'warning' : 'success',
+          message: `${ok} photo${ok !== 1 ? 's' : ''} processed${errs > 0 ? `, ${errs} error${errs !== 1 ? 's' : ''}` : ''}.`,
+        })
       }
-      const res = await batchProcess([...selectedIds], actions)
-      const totalActions = res.results.reduce((sum, r) => sum + r.actions.filter(a => a.status === 'ok').length, 0)
-      const totalErrors = res.results.reduce((sum, r) => sum + r.actions.filter(a => a.status === 'error').length, 0) + (res.errors?.length || 0)
-      setBatchStatus({
-        type: totalErrors > 0 ? 'warning' : 'success',
-        message: `Processed ${res.results.length} photos: ${totalActions} actions completed${totalErrors > 0 ? `, ${totalErrors} errors` : ''}`,
-      })
     } catch (err) {
-      setBatchStatus({ type: 'error', message: `Batch processing failed: ${err.message}` })
+      setBulkStatus({ type: 'error', message: `Bulk ${action} failed: ${err.message}` })
     } finally {
-      setBatchRunning(false)
+      setBulkRunning(false)
+      setBulkProgress(null)
     }
   }
 
@@ -116,21 +180,6 @@ function Analysis() {
     )
   }
 
-  const results = run.results || []
-  const errors = run.errors || []
-
-  // Preset distribution
-  const presetCounts = {}
-  results.forEach(r => {
-    const preset = r.preset_recommendation?.preset?.name || 'No recommendation'
-    presetCounts[preset] = (presetCounts[preset] || 0) + 1
-  })
-
-  const rotationPhotos = photos.filter(p => p.needs_rotation)
-  const upscalePhotos = photos.filter(p => p.needs_upscale)
-  const needsRotation = rotationPhotos.length
-  const needsUpscale = upscalePhotos.length
-
   return (
     <div className="analysis-page">
       <div className="page-header">
@@ -143,7 +192,6 @@ function Analysis() {
         <Link to="/" className="btn btn-secondary">Back to Dashboard</Link>
       </div>
 
-      {/* Summary stats */}
       <div className="stats-row">
         <div className="stat-card">
           <div className="stat-value">{run.total_analyzed}</div>
@@ -157,25 +205,16 @@ function Analysis() {
           <div className="stat-value">${run.estimated_cost_usd?.toFixed(4)}</div>
           <div className="stat-label">Cost</div>
         </div>
-        {needsRotation > 0 && (
-          <div className="stat-card stat-warning">
-            <div className="stat-value">{needsRotation}</div>
-            <div className="stat-label">Need Rotation</div>
-          </div>
-        )}
-        {needsUpscale > 0 && (
-          <div className="stat-card stat-warning">
-            <div className="stat-value">{needsUpscale}</div>
-            <div className="stat-label">Need Upscale</div>
-          </div>
-        )}
+        <div className={`stat-card ${shortlistIds.size > 0 ? 'stat-accent' : ''}`}>
+          <div className="stat-value">{shortlistIds.size}</div>
+          <div className="stat-label">Shortlisted</div>
+        </div>
       </div>
 
-      {/* Preset distribution */}
       {Object.keys(presetCounts).length > 0 && (
-        <div className="section">
-          <h2>Preset Distribution</h2>
-          <div className="preset-distribution">
+        <details className="section">
+          <summary><h2 style={{ display: 'inline' }}>Preset Distribution</h2></summary>
+          <div className="preset-distribution" style={{ marginTop: 10 }}>
             {Object.entries(presetCounts)
               .sort(([, a], [, b]) => b - a)
               .map(([preset, count]) => (
@@ -185,130 +224,151 @@ function Analysis() {
                 </div>
               ))}
           </div>
-        </div>
+        </details>
       )}
 
-      {/* Batch Processing Panel */}
-      {(needsRotation > 0 || needsUpscale > 0) && (
-        <div className="section">
-          <h2>Batch Processing</h2>
-          <div className="batch-panel">
-            <p className="muted" style={{ marginBottom: 12 }}>
-              Select photos to process in batch. Tick the actions to apply, then hit Process.
-            </p>
-
-            <div className="batch-select-row">
-              <span className="batch-label">Quick select:</span>
-              {needsRotation > 0 && (
-                <button className="btn btn-small" onClick={() => selectAllNeeding('rotation')}>
-                  All needing rotation ({needsRotation})
-                </button>
-              )}
-              {needsUpscale > 0 && (
-                <button className="btn btn-small" onClick={() => selectAllNeeding('upscale')}>
-                  All needing upscale ({needsUpscale})
-                </button>
-              )}
-              <button className="btn btn-small" onClick={selectNone}>
-                Clear selection
-              </button>
-            </div>
-
-            <div className="batch-photo-list">
-              {photos.filter(p => p.needs_rotation || p.needs_upscale).map(p => (
-                <label key={p.id} className={`batch-photo-item ${selectedIds.has(p.id) ? 'selected' : ''}`}>
-                  <input
-                    type="checkbox"
-                    checked={selectedIds.has(p.id)}
-                    onChange={() => togglePhotoSelection(p.id)}
-                  />
-                  <img src={p.thumbnail_url} alt={p.filename} className="batch-thumb" />
-                  <div className="batch-photo-info">
-                    <span className="batch-photo-name">{p.filename.length > 25 ? p.filename.slice(0, 22) + '...' : p.filename}</span>
-                    <span className="batch-photo-tags">
-                      {p.needs_rotation && <span className="issue-badge rotation-badge inline-badge">R</span>}
-                      {p.needs_upscale && <span className="issue-badge upscale-badge inline-badge">U</span>}
-                      <span className="muted">{p.width}x{p.height}</span>
-                    </span>
-                  </div>
-                </label>
-              ))}
-            </div>
-
-            <div className="batch-actions-row">
-              <div className="batch-action-toggles">
-                <label className="batch-action-toggle">
-                  <input
-                    type="checkbox"
-                    checked={batchActions.rotate}
-                    onChange={e => setBatchActions(prev => ({ ...prev, rotate: e.target.checked }))}
-                  />
-                  Fix Rotation
-                </label>
-                <label className="batch-action-toggle">
-                  <input
-                    type="checkbox"
-                    checked={batchActions.upscale}
-                    onChange={e => setBatchActions(prev => ({ ...prev, upscale: e.target.checked }))}
-                  />
-                  Upscale Resolution
-                </label>
-                <label className="batch-action-toggle">
-                  <input
-                    type="checkbox"
-                    checked={batchActions.save}
-                    onChange={e => setBatchActions(prev => ({ ...prev, save: e.target.checked }))}
-                  />
-                  Save Copy
-                </label>
-              </div>
-
-              <button
-                className="btn btn-primary btn-large"
-                disabled={batchRunning || selectedIds.size === 0}
-                onClick={handleBatchProcess}
-              >
-                {batchRunning ? 'Processing...' : `Process ${selectedIds.size} Photo${selectedIds.size !== 1 ? 's' : ''}`}
-              </button>
-            </div>
-
-            {batchStatus && (
-              <div className={`action-status ${batchStatus.type === 'success' ? 'action-success' : batchStatus.type === 'warning' ? 'action-warning' : 'action-error'}`}>
-                {batchStatus.message}
-              </div>
-            )}
-          </div>
-        </div>
-      )}
-
-      {/* Errors */}
-      {errors.length > 0 && (
-        <div className="section">
-          <h2 className="text-error">Errors ({errors.length})</h2>
-          <div className="error-list">
-            {errors.map((err, i) => (
+      {runErrors.length > 0 && (
+        <details className="section">
+          <summary><h2 className="text-error" style={{ display: 'inline' }}>Errors ({runErrors.length})</h2></summary>
+          <div className="error-list" style={{ marginTop: 10 }}>
+            {runErrors.map((err, i) => (
               <div key={i} className="error-item">
                 <strong>{err.filename}</strong>: {err.error}
               </div>
             ))}
           </div>
+        </details>
+      )}
+
+      <div className="section">
+        <div className="tab-bar">
+          <button
+            className={`tab-btn ${activeTab === 'all' ? 'tab-btn-active' : ''}`}
+            onClick={() => setActiveTab('all')}
+          >
+            All Photos ({analyzedPhotos.length})
+          </button>
+          <button
+            className={`tab-btn ${activeTab === 'shortlist' ? 'tab-btn-active' : ''}`}
+            onClick={() => setActiveTab('shortlist')}
+          >
+            Shortlist ({shortlistIds.size})
+          </button>
+        </div>
+
+        <div className="selection-controls">
+          <button className="btn btn-small" onClick={selectAll}>Select All</button>
+          {selectedIds.size > 0 && (
+            <button className="btn btn-small" onClick={selectNone}>Clear ({selectedIds.size})</button>
+          )}
+          <span className="muted" style={{ fontSize: '0.8rem' }}>
+            {selectedIds.size > 0
+              ? `${selectedIds.size} selected`
+              : 'Click checkboxes to select photos'}
+          </span>
+        </div>
+
+        {activeTab === 'shortlist' && shortlistPhotos.length === 0 && (
+          <div className="empty-state" style={{ padding: '40px 0' }}>
+            <p>No photos shortlisted yet.</p>
+            <p className="muted">Switch to All Photos, select the ones you want, and click "Add to Shortlist".</p>
+          </div>
+        )}
+
+        {displayPhotos.length > 0 && (
+          <PhotoGrid
+            photos={displayPhotos}
+            results={results}
+            onPhotoClick={handlePhotoClick}
+            selectable={true}
+            selectedIds={selectedIds}
+            onSelect={toggleSelection}
+          />
+        )}
+      </div>
+
+      {selectedIds.size > 0 && (
+        <div className="floating-action-bar">
+          <div className="fab-left">
+            <span className="fab-count">{selectedIds.size} selected</span>
+          </div>
+          <div className="fab-actions">
+            <button
+              className="btn btn-secondary"
+              onClick={() => handleBulkAction('crop')}
+              disabled={bulkRunning}
+            >
+              Bulk Crop
+            </button>
+            <button
+              className="btn btn-primary"
+              onClick={() => handleBulkAction('enhance')}
+              disabled={bulkRunning}
+            >
+              Bulk Enhance
+            </button>
+            <button
+              className="btn btn-secondary"
+              onClick={() => handleBulkAction('save')}
+              disabled={bulkRunning}
+            >
+              Bulk Save
+            </button>
+            <button
+              className="btn btn-accent"
+              onClick={() => handleBulkAction('rename')}
+              disabled={bulkRunning}
+              title="Save photos to processed/ renamed to their recommended Lightroom preset"
+            >
+              Rename to Preset
+            </button>
+            {activeTab === 'all' && (
+              <>
+                <div className="fab-divider" />
+                <button className="btn btn-small" onClick={addToShortlist} disabled={bulkRunning}>
+                  Shortlist
+                </button>
+              </>
+            )}
+            {activeTab === 'shortlist' && (
+              <>
+                <div className="fab-divider" />
+                <button
+                  className="btn btn-danger btn-small"
+                  onClick={removeFromShortlist}
+                  disabled={bulkRunning}
+                >
+                  Remove
+                </button>
+              </>
+            )}
+          </div>
         </div>
       )}
 
-      {/* Results grid */}
-      <div className="section">
-        <h2>Your Photos ({results.length})</h2>
-        <p className="muted" style={{ marginBottom: 12 }}>
-          Click any photo to see its recommended Lightroom preset, crop, or save.
-        </p>
-        <PhotoGrid
-          photos={photos}
-          results={results}
-          onPhotoClick={handlePhotoClick}
-        />
-      </div>
+      {(bulkRunning || bulkStatus) && (
+        <div className="bulk-status-bar">
+          {bulkRunning && (
+            <div className="bulk-progress">
+              <div className="upscale-spinner" />
+              <span>{bulkProgress}</span>
+            </div>
+          )}
+          {bulkStatus && (
+            <div className={`action-status ${
+              bulkStatus.type === 'success' ? 'action-success'
+                : bulkStatus.type === 'warning' ? 'action-warning'
+                  : 'action-error'
+            }`}>
+              {bulkStatus.message}
+              <button className="alert-dismiss" onClick={() => setBulkStatus(null)}>
+                Dismiss
+              </button>
+            </div>
+          )}
+        </div>
+      )}
 
-      {/* Photo detail modal */}
       {selectedPhoto && (
         <PhotoDetail
           photo={selectedPhoto}
