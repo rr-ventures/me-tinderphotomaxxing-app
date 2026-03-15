@@ -55,6 +55,37 @@ async function postJson(path, body) {
 
 // ── Photo endpoints ─────────────────────────────────────────────────────
 
+export async function uploadPhotos(files, onProgress) {
+  const formData = new FormData()
+  for (const file of files) {
+    formData.append('files', file)
+  }
+  const xhr = new XMLHttpRequest()
+  return new Promise((resolve, reject) => {
+    xhr.upload.addEventListener('progress', (e) => {
+      if (e.lengthComputable && onProgress) {
+        onProgress(Math.round((e.loaded / e.total) * 100))
+      }
+    })
+    xhr.addEventListener('load', () => {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        resolve(JSON.parse(xhr.responseText))
+      } else {
+        try {
+          const err = JSON.parse(xhr.responseText)
+          reject(new Error(err.detail || `Upload failed: ${xhr.status}`))
+        } catch {
+          reject(new Error(`Upload failed: ${xhr.status}`))
+        }
+      }
+    })
+    xhr.addEventListener('error', () => reject(new Error('Upload failed: network error')))
+    xhr.addEventListener('abort', () => reject(new Error('Upload cancelled')))
+    xhr.open('POST', `${API_BASE}/photos/upload`)
+    xhr.send(formData)
+  })
+}
+
 export async function listPhotos() {
   return get('/photos')
 }

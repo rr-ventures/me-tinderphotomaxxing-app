@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Optional
 
 from dotenv import load_dotenv
-from fastapi import APIRouter, HTTPException, Body
+from fastapi import APIRouter, HTTPException, Body, UploadFile, File
 from fastapi.responses import FileResponse
 from PIL import Image
 from pydantic import BaseModel
@@ -143,6 +143,43 @@ async def get_full_photo(photo_id: str):
 async def photo_count():
     config.INPUT_DIR.mkdir(parents=True, exist_ok=True)
     return {"count": len(scan_image_paths())}
+
+
+ALLOWED_UPLOAD_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".heic", ".tiff", ".bmp"}
+
+
+@router.post("/photos/upload")
+async def upload_photos(files: list[UploadFile] = File(...)):
+    """Upload multiple photos to the to_process/ folder."""
+    config.INPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+    saved = []
+    skipped = []
+
+    for f in files:
+        ext = Path(f.filename or "").suffix.lower()
+        if ext not in ALLOWED_UPLOAD_EXTENSIONS:
+            skipped.append({"filename": f.filename, "reason": f"Unsupported format: {ext}"})
+            continue
+
+        dest = config.INPUT_DIR / f.filename
+        counter = 2
+        while dest.exists():
+            dest = config.INPUT_DIR / f"{Path(f.filename).stem}_{counter}{ext}"
+            counter += 1
+
+        contents = await f.read()
+        with open(dest, "wb") as out:
+            out.write(contents)
+
+        saved.append({"filename": dest.name, "size_kb": round(len(contents) / 1024, 1)})
+
+    return {
+        "uploaded": len(saved),
+        "skipped": len(skipped),
+        "files": saved,
+        "skipped_files": skipped,
+    }
 
 
 @router.post("/photos/{photo_id}/rotate")
@@ -482,6 +519,7 @@ class ProcessPhotoRequest(BaseModel):
     crop: Optional[dict] = None
     adjustments: Optional[dict] = None
     upscale: bool = False
+    upscale_mode: Optional[str] = "enhance"
     output_filename: Optional[str] = None
     rename_to_preset: bool = False
     run_id: Optional[str] = None
@@ -550,6 +588,9 @@ async def process_photo(photo_id: str, req: ProcessPhotoRequest):
             if not api_key:
                 raise HTTPException(status_code=500, detail="No API key for upscale")
 
+            upscale_mode = req.upscale_mode if req.upscale_mode in UPSCALE_PROMPTS else "enhance"
+            prompt = UPSCALE_PROMPTS[upscale_mode]
+
             client = genai.Client(api_key=api_key)
             response = client.models.generate_content(
                 model=config.EDIT_MODEL,
@@ -557,10 +598,7 @@ async def process_photo(photo_id: str, req: ProcessPhotoRequest):
                     role="user",
                     parts=[
                         types.Part.from_bytes(data=buf.getvalue(), mime_type="image/jpeg"),
-                        types.Part.from_text(
-                            text="Upscale and enhance this photo to higher resolution. "
-                            "Preserve all details, colors, and composition exactly."
-                        ),
+                        types.Part.from_text(text=prompt),
                     ],
                 )],
                 config=types.GenerateContentConfig(response_modalities=["IMAGE", "TEXT"]),

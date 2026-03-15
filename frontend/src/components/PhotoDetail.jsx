@@ -83,6 +83,14 @@ function PhotoDetail({ photo, result, runId, onClose }) {
   const [upscaleStep, setUpscaleStep] = useState('')
   const stepTimers = useRef([])
 
+  const [compareMode, setCompareMode] = useState(false)
+  const [claritySrc, setClaritySrc] = useState(null)
+  const [enhanceSrc, setEnhanceSrc] = useState(null)
+  const [selectedUpscaleForSave, setSelectedUpscaleForSave] = useState(null)
+
+  const [presetPreviewMode, setPresetPreviewMode] = useState('none')
+  const [presetPreviewFilter, setPresetPreviewFilter] = useState(null)
+
   const [showOriginal, setShowOriginal] = useState(false)
   const [appliedAdjustments, setAppliedAdjustments] = useState(null)
   const [filename, setFilename] = useState('')
@@ -172,6 +180,9 @@ function PhotoDetail({ photo, result, runId, onClose }) {
     setUpscaleLoading(true)
     setUpscaleStep(UPSCALE_STEPS[0].text)
     setStatus(null)
+    setCompareMode(false)
+    setClaritySrc(null)
+    setEnhanceSrc(null)
 
     stepTimers.current.forEach(t => clearTimeout(t))
     stepTimers.current = UPSCALE_STEPS.slice(1).map(step =>
@@ -187,6 +198,7 @@ function PhotoDetail({ photo, result, runId, onClose }) {
       })
       setUpscaleSrc(url)
       setUpscaleApplied(true)
+      setSelectedUpscaleForSave(upscaleMode)
       setStatus({
         type: 'success',
         message: `Enhancement applied (${upscaleMode === 'clarity' ? 'Clarity Only' : 'Full Enhance'}). Hold "Compare" to see original.`,
@@ -201,13 +213,50 @@ function PhotoDetail({ photo, result, runId, onClose }) {
     }
   }
 
+  async function applyCompareBoth() {
+    setUpscaleLoading(true)
+    setUpscaleStep('Running Clarity and Enhance in parallel...')
+    setStatus(null)
+    setUpscaleSrc(null)
+    setClaritySrc(null)
+    setEnhanceSrc(null)
+
+    const hasCrop = appliedCrop && !(appliedCrop.x === 0 && appliedCrop.y === 0 && appliedCrop.w === 100 && appliedCrop.h === 100)
+    const opts = { crop: hasCrop ? appliedCrop : null, adjustments: appliedAdjustments }
+
+    try {
+      const [clarityUrl, enhanceUrl] = await Promise.all([
+        upscalePreviewUrl(photo.id, { ...opts, mode: 'clarity' }),
+        upscalePreviewUrl(photo.id, { ...opts, mode: 'enhance' }),
+      ])
+      setClaritySrc(clarityUrl)
+      setEnhanceSrc(enhanceUrl)
+      setUpscaleApplied(true)
+      setCompareMode(true)
+      setSelectedUpscaleForSave('enhance')
+      setStatus({
+        type: 'success',
+        message: 'Both modes ready. Compare side-by-side, then pick one to save.',
+      })
+    } catch (err) {
+      setStatus({ type: 'error', message: `Compare failed: ${err.message}` })
+    } finally {
+      setUpscaleLoading(false)
+      setUpscaleStep('')
+    }
+  }
+
   function revertUpscale() {
     setUpscaleApplied(false)
     setUpscaleSrc(null)
+    setClaritySrc(null)
+    setEnhanceSrc(null)
+    setCompareMode(false)
+    setSelectedUpscaleForSave(null)
     setStatus(null)
   }
 
-  const displaySrc = showOriginal ? originalSrc : (upscaleSrc || previewSrc || originalSrc)
+  const singleDisplaySrc = showOriginal ? originalSrc : (upscaleSrc || previewSrc || originalSrc)
   const hasEdits = !!appliedCrop || !!appliedAdjustments || upscaleApplied
 
   if (!result) {
@@ -244,15 +293,64 @@ function PhotoDetail({ photo, result, runId, onClose }) {
                 crop={crop}
                 onCropChange={setCrop}
               />
+            ) : compareMode ? (
+              <div className="ai-compare-grid">
+                <div className="ai-compare-cell">
+                  <img src={originalSrc} alt="Original" />
+                  <div className="ai-compare-label">Original</div>
+                </div>
+                <div className="ai-compare-cell">
+                  <img src={claritySrc} alt="Clarity" />
+                  <div className="ai-compare-label">Clarity Only</div>
+                  <button
+                    className={`btn btn-small ${selectedUpscaleForSave === 'clarity' ? 'btn-primary' : 'btn-secondary'}`}
+                    onClick={() => setSelectedUpscaleForSave('clarity')}
+                  >
+                    {selectedUpscaleForSave === 'clarity' ? '✓ Save this' : 'Save this'}
+                  </button>
+                </div>
+                <div className="ai-compare-cell">
+                  <img src={enhanceSrc} alt="Full Enhance" />
+                  <div className="ai-compare-label">Full Enhance</div>
+                  <button
+                    className={`btn btn-small ${selectedUpscaleForSave === 'enhance' ? 'btn-primary' : 'btn-secondary'}`}
+                    onClick={() => setSelectedUpscaleForSave('enhance')}
+                  >
+                    {selectedUpscaleForSave === 'enhance' ? '✓ Save this' : 'Save this'}
+                  </button>
+                </div>
+              </div>
+            ) : presetPreviewMode === 'compare' && recommendations.length > 0 ? (
+              <div className="preset-compare-grid">
+                <div className="preset-compare-cell">
+                  <img src={originalSrc} alt="Original" />
+                  <div className="preset-compare-label">Original</div>
+                </div>
+                {recommendations.slice(0, 3).map((rec, i) => {
+                  const p = rec.preset
+                  if (!p) return null
+                  const cssFilter = getFilterForPreset(p.name)
+                  return (
+                    <div key={rec.id || i} className="preset-compare-cell">
+                      <img src={originalSrc} alt={p.name} style={{ filter: cssFilter }} />
+                      <div className="preset-compare-label">#{i + 1} {p.name}</div>
+                    </div>
+                  )
+                })}
+              </div>
             ) : (
               <div className="photo-compare-wrapper">
-                <img src={displaySrc} alt={photo.filename} />
+                <img
+                  src={singleDisplaySrc}
+                  alt={photo.filename}
+                  style={presetPreviewFilter ? { filter: presetPreviewFilter } : undefined}
+                />
                 {showOriginal && <div className="compare-badge">Original</div>}
               </div>
             )}
 
             <div className="photo-controls-bar">
-              {hasEdits && !cropMode && (
+              {hasEdits && !cropMode && !compareMode && (
                 <div className="preview-badge">
                   {[
                     appliedCrop && 'Cropped',
@@ -261,7 +359,7 @@ function PhotoDetail({ photo, result, runId, onClose }) {
                   ].filter(Boolean).join(' + ')}
                 </div>
               )}
-              {hasEdits && !cropMode && (
+              {hasEdits && !cropMode && !compareMode && (
                 <button
                   className="btn btn-small btn-compare"
                   onMouseDown={() => setShowOriginal(true)}
@@ -272,6 +370,9 @@ function PhotoDetail({ photo, result, runId, onClose }) {
                 >
                   Hold to Compare
                 </button>
+              )}
+              {compareMode && (
+                <div className="preview-badge">Pick which to save, then click Save below</div>
               )}
             </div>
           </div>
@@ -292,10 +393,23 @@ function PhotoDetail({ photo, result, runId, onClose }) {
                     Based on your photo's detected scenario, here are the best Adaptive presets to apply in Lightroom.
                   </p>
 
+                  <div className="preset-preview-actions">
+                    <button
+                      className={`btn btn-small ${presetPreviewMode === 'compare' ? 'btn-primary' : 'btn-secondary'}`}
+                      onClick={() => {
+                        setPresetPreviewMode(presetPreviewMode === 'compare' ? 'none' : 'compare')
+                        setPresetPreviewFilter(null)
+                      }}
+                    >
+                      {presetPreviewMode === 'compare' ? '✓ Compare all 3 on full image' : 'Compare all 3 on full image'}
+                    </button>
+                  </div>
+
                   {recommendations.map((rec, i) => {
                     const p = rec.preset
                     if (!p) return null
                     const cssFilter = getFilterForPreset(p.name)
+                    const isPreviewActive = presetPreviewMode === 'single' && presetPreviewFilter === cssFilter
                     return (
                       <div key={rec.id || i} className={`preset-card ${i === 0 ? 'preset-card-primary' : ''}`}>
                         <div className="preset-card-rank">#{i + 1}</div>
@@ -328,10 +442,34 @@ function PhotoDetail({ photo, result, runId, onClose }) {
                               <span className="avoid-label">Avoid: </span>{p.avoid}
                             </div>
                           )}
+
+                          <button
+                            className={`btn btn-small preset-preview-full-btn ${isPreviewActive ? 'btn-primary' : ''}`}
+                            onClick={() => {
+                              if (isPreviewActive) {
+                                setPresetPreviewMode('none')
+                                setPresetPreviewFilter(null)
+                              } else {
+                                setPresetPreviewMode('single')
+                                setPresetPreviewFilter(cssFilter)
+                              }
+                            }}
+                          >
+                            {isPreviewActive ? '✓ Previewing full' : 'Preview on full image'}
+                          </button>
                         </div>
                       </div>
                     )
                   })}
+
+                  <details className="preset-proof-section">
+                    <summary>How we know this preview is accurate (proof)</summary>
+                    <div className="preset-proof-content">
+                      <p><strong>Evidence &amp; Avoid are from real Lightroom presets.</strong> The &quot;Why&quot; and &quot;Avoid&quot; text comes from our research-backed preset library (<code>production_preset_recommendations.yml</code>), which maps photo metadata (lighting, scene, face visibility) to Adobe Lightroom Adaptive presets.</p>
+                      <p><strong>CSS filters are approximations.</strong> Lightroom uses AI masking and per-pixel adjustments. Our preview uses CSS filters (brightness, contrast, saturation, etc.) to approximate the visual effect. It gives you a rough idea — the actual preset in Lightroom will look more refined.</p>
+                      <p><strong>The recommendation is accurate.</strong> The preset name, path, evidence, and avoid guidance are based on dating-photo research (Photofeeler, Hinge, OkCupid). The visual preview is our best CSS approximation of that preset&apos;s look.</p>
+                    </div>
+                  </details>
                 </>
               ) : (
                 <p className="muted">No preset recommendations available.</p>
@@ -408,13 +546,20 @@ function PhotoDetail({ photo, result, runId, onClose }) {
                 <h3>AI Enhancement</h3>
                 <div className="edit-section-actions">
                   {!upscaleApplied && !upscaleLoading && (
-                    <button className="btn btn-small btn-primary" onClick={applyUpscale}>
-                      Apply
-                    </button>
+                    <>
+                      <button className="btn btn-small btn-primary" onClick={applyUpscale}>
+                        Apply {upscaleMode === 'clarity' ? 'Clarity' : 'Enhance'}
+                      </button>
+                      <button className="btn btn-small btn-accent" onClick={applyCompareBoth}>
+                        Compare Both
+                      </button>
+                    </>
                   )}
                   {upscaleApplied && (
                     <>
-                      <span className="edit-applied-tag">Applied</span>
+                      <span className="edit-applied-tag">
+                        {compareMode ? 'Compare mode' : 'Applied'}
+                      </span>
                       <button className="btn btn-small btn-danger" onClick={revertUpscale}>Revert</button>
                     </>
                   )}
@@ -569,11 +714,13 @@ function PhotoDetail({ photo, result, runId, onClose }) {
     setStatus(null)
     try {
       const hasCrop = appliedCrop && !(appliedCrop.x === 0 && appliedCrop.y === 0 && appliedCrop.w === 100 && appliedCrop.h === 100)
+      const modeToSave = upscaleApplied ? (selectedUpscaleForSave || upscaleMode) : null
       const res = await processPhoto(photo.id, {
         rotate: true,
         crop: hasCrop ? appliedCrop : null,
         adjustments: appliedAdjustments,
         upscale: upscaleApplied,
+        upscale_mode: modeToSave,
         output_filename: filename || null,
       })
       setStatus({ type: 'success', message: `Saved as ${res.filename}` })

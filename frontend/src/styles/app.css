@@ -1040,6 +1040,18 @@ body {
   color: var(--error);
 }
 
+.alert-success {
+  background: #0a1c0a;
+  border: 1px solid #166534;
+  color: #4ade80;
+}
+
+.alert-warning {
+  background: #1c1a0a;
+  border: 1px solid #854d0e;
+  color: #fbbf24;
+}
+
 .alert-dismiss {
   background: none;
   border: none;
@@ -1047,6 +1059,85 @@ body {
   cursor: pointer;
   font-size: 0.85rem;
   text-decoration: underline;
+}
+
+/* ── Upload Zone ─────────────────────────────────────────────────────────── */
+.upload-zone {
+  border: 2px dashed var(--border);
+  border-radius: var(--radius-lg);
+  padding: 40px 24px;
+  text-align: center;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  margin-bottom: 24px;
+  background: var(--bg-card);
+}
+
+.upload-zone:hover {
+  border-color: var(--accent);
+  background: rgba(99, 160, 255, 0.04);
+}
+
+.upload-zone-active {
+  border-color: var(--accent);
+  background: rgba(99, 160, 255, 0.08);
+  box-shadow: 0 0 0 4px rgba(99, 160, 255, 0.1);
+}
+
+.upload-zone-uploading {
+  cursor: default;
+  pointer-events: none;
+}
+
+.upload-icon {
+  font-size: 2.5rem;
+  font-weight: 300;
+  color: var(--accent);
+  line-height: 1;
+  margin-bottom: 12px;
+}
+
+.upload-text {
+  font-size: 1rem;
+  color: var(--text-primary);
+  margin-bottom: 6px;
+}
+
+.upload-hint {
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+}
+
+.upload-progress {
+  position: relative;
+  height: 36px;
+  background: var(--bg-main);
+  border-radius: var(--radius);
+  overflow: hidden;
+  max-width: 500px;
+  margin: 0 auto;
+}
+
+.upload-progress-bar {
+  position: absolute;
+  top: 0;
+  left: 0;
+  height: 100%;
+  background: var(--accent);
+  opacity: 0.25;
+  transition: width 0.3s ease;
+  border-radius: var(--radius);
+}
+
+.upload-progress-text {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  font-size: 0.85rem;
+  color: var(--text-primary);
+  font-weight: 500;
 }
 
 /* ── Errors ────────────────────────────────────────────────────────────────── */
@@ -2287,6 +2378,101 @@ body {
   padding: 0;
 }
 
+/* ── AI Compare Grid ─────────────────────────────────────────────────────── */
+.ai-compare-grid,
+.preset-compare-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 12px;
+}
+
+.preset-compare-grid {
+  grid-template-columns: repeat(4, 1fr);
+}
+
+.ai-compare-cell,
+.preset-compare-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+
+.ai-compare-cell img,
+.preset-compare-cell img {
+  width: 100%;
+  aspect-ratio: 1;
+  object-fit: cover;
+  display: block;
+}
+
+.ai-compare-label,
+.preset-compare-label {
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--text-primary);
+  padding: 0 10px 4px;
+}
+
+.preset-compare-label {
+  font-size: 0.72rem;
+  color: var(--text-secondary);
+}
+
+.ai-compare-cell .btn {
+  margin: 0 10px 10px;
+}
+
+/* ── Preset Preview Actions ──────────────────────────────────────────────── */
+.preset-preview-actions {
+  margin-bottom: 12px;
+}
+
+.preset-preview-full-btn {
+  margin-top: 8px;
+}
+
+/* ── Preset Proof Section ─────────────────────────────────────────────────── */
+.preset-proof-section {
+  margin-top: 16px;
+  padding: 12px 14px;
+  background: rgba(0, 0, 0, 0.2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.preset-proof-section summary {
+  cursor: pointer;
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.preset-proof-content {
+  margin-top: 12px;
+  font-size: 0.82rem;
+  color: var(--text-secondary);
+  line-height: 1.6;
+}
+
+.preset-proof-content p {
+  margin-bottom: 10px;
+}
+
+.preset-proof-content p:last-child {
+  margin-bottom: 0;
+}
+
+.preset-proof-content code {
+  background: rgba(255, 255, 255, 0.08);
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 0.78rem;
+}
+
 /* ── Responsive ───────────────────────────────────────────────────────────── */
 @media (max-width: 768px) {
   .main-content {
@@ -2299,6 +2485,14 @@ body {
 
   .detail-body {
     grid-template-columns: 1fr;
+  }
+
+  .ai-compare-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .preset-compare-grid {
+    grid-template-columns: repeat(2, 1fr);
   }
 
   .photo-grid {

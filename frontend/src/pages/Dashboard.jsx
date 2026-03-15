@@ -25,15 +25,14 @@
  *   The difference: in React, we call these inside useEffect() or
  *   event handlers, and update state when the response arrives.
  */
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef, useCallback } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { listPhotos, analyzeBatch, listRuns } from '../api/client'
+import { listPhotos, analyzeBatch, listRuns, uploadPhotos } from '../api/client'
 import PhotoGrid from '../components/PhotoGrid'
 import ModelSelector from '../components/ModelSelector'
 import CostEstimate from '../components/CostEstimate'
 
 function Dashboard() {
-  // State variables (like Python instance variables, but React-aware)
   const [photos, setPhotos] = useState([])
   const [model, setModel] = useState(null)
   const [loading, setLoading] = useState(true)
@@ -42,10 +41,14 @@ function Dashboard() {
   const [runs, setRuns] = useState([])
   const [batchLimit, setBatchLimit] = useState(0)
 
-  // useNavigate lets us redirect to another page programmatically
+  const [uploading, setUploading] = useState(false)
+  const [uploadProgress, setUploadProgress] = useState(0)
+  const [uploadResult, setUploadResult] = useState(null)
+  const [dragOver, setDragOver] = useState(false)
+  const fileInputRef = useRef(null)
+
   const navigate = useNavigate()
 
-  // Load photos and past runs when the page first appears
   useEffect(() => {
     loadPhotos()
     loadRuns()
@@ -87,6 +90,48 @@ function Dashboard() {
     }
   }
 
+  const handleFiles = useCallback(async (files) => {
+    if (!files || files.length === 0) return
+    const imageFiles = [...files].filter(f =>
+      /\.(jpe?g|png|webp|heic|tiff|bmp)$/i.test(f.name)
+    )
+    if (imageFiles.length === 0) {
+      setError('No supported image files selected (JPG, PNG, WebP, HEIC, TIFF, BMP)')
+      return
+    }
+
+    setUploading(true)
+    setUploadProgress(0)
+    setUploadResult(null)
+    setError(null)
+
+    try {
+      const result = await uploadPhotos(imageFiles, setUploadProgress)
+      setUploadResult(result)
+      await loadPhotos()
+    } catch (err) {
+      setError(`Upload failed: ${err.message}`)
+    } finally {
+      setUploading(false)
+    }
+  }, [])
+
+  function handleDrop(e) {
+    e.preventDefault()
+    setDragOver(false)
+    handleFiles(e.dataTransfer.files)
+  }
+
+  function handleDragOver(e) {
+    e.preventDefault()
+    setDragOver(true)
+  }
+
+  function handleDragLeave(e) {
+    e.preventDefault()
+    setDragOver(false)
+  }
+
   const photoCount = photos.length
 
   return (
@@ -98,7 +143,6 @@ function Dashboard() {
         </p>
       </div>
 
-      {/* Error display */}
       {error && (
         <div className="alert alert-error">
           <strong>Error:</strong> {error}
@@ -106,7 +150,50 @@ function Dashboard() {
         </div>
       )}
 
-      {/* Analysis controls */}
+      <div
+        className={`upload-zone ${dragOver ? 'upload-zone-active' : ''} ${uploading ? 'upload-zone-uploading' : ''}`}
+        onDrop={handleDrop}
+        onDragOver={handleDragOver}
+        onDragLeave={handleDragLeave}
+        onClick={() => !uploading && fileInputRef.current?.click()}
+      >
+        <input
+          ref={fileInputRef}
+          type="file"
+          multiple
+          accept=".jpg,.jpeg,.png,.webp,.heic,.tiff,.bmp"
+          style={{ display: 'none' }}
+          onChange={e => {
+            handleFiles(e.target.files)
+            e.target.value = ''
+          }}
+        />
+        {uploading ? (
+          <div className="upload-progress">
+            <div className="upload-progress-bar" style={{ width: `${uploadProgress}%` }} />
+            <span className="upload-progress-text">{uploadProgress}% uploading...</span>
+          </div>
+        ) : (
+          <>
+            <div className="upload-icon">+</div>
+            <p className="upload-text">
+              Drag & drop photos here, or click to browse
+            </p>
+            <p className="upload-hint">
+              JPG, PNG, WebP, HEIC, TIFF, BMP — up to hundreds of photos at once
+            </p>
+          </>
+        )}
+      </div>
+
+      {uploadResult && (
+        <div className={`alert ${uploadResult.skipped > 0 ? 'alert-warning' : 'alert-success'}`}>
+          Uploaded {uploadResult.uploaded} photo{uploadResult.uploaded !== 1 ? 's' : ''}
+          {uploadResult.skipped > 0 && `, ${uploadResult.skipped} skipped`}
+          <button onClick={() => setUploadResult(null)} className="alert-dismiss">Dismiss</button>
+        </div>
+      )}
+
       <div className="dashboard-controls">
         <div className="control-card">
           <h2>Photos</h2>
@@ -206,13 +293,11 @@ function Dashboard() {
         </div>
       )}
 
-      {/* Empty state */}
       {!loading && photos.length === 0 && (
         <div className="empty-state-large">
           <h2>No photos found</h2>
           <p>
-            Drop your dating profile photos into the <code>data/to_process/</code> folder,
-            then click Refresh.
+            Use the upload area above to add your photos, or drop them into <code>data/to_process/</code> directly.
           </p>
         </div>
       )}
