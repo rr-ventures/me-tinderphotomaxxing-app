@@ -16,11 +16,35 @@ node_modules/
 frontend/dist/
 frontend/.env
 
-# Runtime data
+# Runtime data — entire data/ folder is never committed
 data/to_process/
+data/analyzed/
+data/errored/
 data/processed/
 data/thumbnails/
 data/runs/
+
+# Block all image/video files everywhere as a hard safety net
+*.jpg
+*.jpeg
+*.png
+*.gif
+*.webp
+*.heic
+*.heif
+*.tiff
+*.tif
+*.bmp
+*.raw
+*.cr2
+*.nef
+*.arw
+*.dng
+*.mp4
+*.mov
+*.avi
+*.mkv
+*.zip
 
 # IDE
 .idea/
