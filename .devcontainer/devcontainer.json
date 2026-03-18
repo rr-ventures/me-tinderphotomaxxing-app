@@ -7,7 +7,16 @@
     }
   },
   "postCreateCommand": "pip install --no-cache-dir -r backend/requirements.txt && cd frontend && npm install",
-  "forwardPorts": [8000, 5173],
+  "forwardPorts": [8000, 3000],
+  "portsAttributes": {
+    "3000": {
+      "label": "Frontend",
+      "onAutoForward": "openBrowser"
+    },
+    "8000": {
+      "label": "Backend API"
+    }
+  },
   "customizations": {
     "vscode": {
       "extensions": [

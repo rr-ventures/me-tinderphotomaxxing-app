@@ -6,6 +6,8 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = PROJECT_ROOT / "data"
 INPUT_DIR = DATA_DIR / "to_process"
+ANALYZED_DIR = DATA_DIR / "analyzed"
+ERRORED_DIR = DATA_DIR / "errored"
 OUTPUT_DIR = DATA_DIR / "processed"
 THUMBNAILS_DIR = DATA_DIR / "thumbnails"
 RUNS_DIR = DATA_DIR / "runs"
@@ -34,7 +36,7 @@ DEFAULT_ANALYSIS_MODEL = "gemini-3.1-pro-preview"
 MAX_ANALYSIS_SIZE_PX = 1024
 THUMBNAIL_SIZE = (300, 300)
 SUPPORTED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".heic", ".tiff", ".bmp"}
-ANALYSIS_CONCURRENCY = 5
+ANALYSIS_CONCURRENCY = 3
 BATCH_SIZE = 20
 
 MIN_RESOLUTION_SHORT_SIDE = 1080

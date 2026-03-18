@@ -10,31 +10,95 @@ from pathlib import Path
 from backend import config
 
 
-def scan_image_paths(input_dir: Path | None = None) -> list[Path]:
+def scan_image_paths(
+    input_dir: Path | None = None,
+    include_analyzed: bool = False,
+    include_errored: bool = False,
+) -> list[Path]:
     """
-    Find all supported image files in the input directory.
+    Find all supported image files in the input directory (and optionally analyzed/errored).
+
+    By default only scans to_process/. Pass include_analyzed=True or include_errored=True
+    to also include those folders (used when looking up photos by ID for serving/editing).
 
     Returns deduplicated, sorted list of image paths.
     """
-    folder = input_dir or config.INPUT_DIR
-    if not folder.exists():
-        return []
+    folders: list[Path]
+    if input_dir is not None:
+        folders = [input_dir]
+    else:
+        folders = [config.INPUT_DIR]
+        if include_analyzed:
+            folders.append(config.ANALYZED_DIR)
+        if include_errored:
+            folders.append(config.ERRORED_DIR)
 
     exts = {e.lower() for e in config.SUPPORTED_EXTENSIONS}
-    paths = [
-        p for p in folder.rglob("*")
-        if p.is_file() and p.suffix.lower() in exts
-    ]
+    all_paths: list[Path] = []
+    for folder in folders:
+        if not folder.exists():
+            continue
+        all_paths.extend(
+            p for p in folder.rglob("*")
+            if p.is_file() and p.suffix.lower() in exts
+        )
 
     seen: set[Path] = set()
     unique: list[Path] = []
-    for p in sorted(paths, key=lambda x: str(x).lower()):
+    for p in sorted(all_paths, key=lambda x: str(x).lower()):
         resolved = p.resolve()
         if resolved not in seen:
             seen.add(resolved)
             unique.append(p)
 
     return unique
+
+
+def scan_all_image_paths() -> list[Path]:
+    """Scan to_process/, analyzed/, and errored/ — used for photo lookup by ID."""
+    return scan_image_paths(include_analyzed=True, include_errored=True)
+
+
+def count_photos_by_folder() -> dict:
+    """Return photo counts for the active pipeline folders (to_process, analyzed, errored).
+
+    processed/ is an export destination and is intentionally excluded — it accumulates
+    files from many runs and its count is not meaningful as a pipeline stage.
+    """
+    exts = {e.lower() for e in config.SUPPORTED_EXTENSIONS}
+
+    def _count(folder: Path) -> int:
+        if not folder.exists():
+            return 0
+        return sum(1 for p in folder.rglob("*") if p.is_file() and p.suffix.lower() in exts)
+
+    counts = {
+        "to_process": _count(config.INPUT_DIR),
+        "analyzed": _count(config.ANALYZED_DIR),
+        "errored": _count(config.ERRORED_DIR),
+    }
+
+    # Surface the most recent run's summary so the frontend can show it
+    last_run = None
+    if config.RUNS_DIR.exists():
+        run_files = sorted(config.RUNS_DIR.glob("*.json"), key=lambda p: p.name, reverse=True)
+        for rf in run_files:
+            try:
+                import json as _json
+                with open(rf, encoding="utf-8") as f:
+                    d = _json.load(f)
+                last_run = {
+                    "run_id": d.get("run_id", rf.stem),
+                    "total_photos": d.get("total_photos", 0),
+                    "total_analyzed": d.get("total_analyzed", 0),
+                    "total_errors": d.get("total_errors", 0),
+                }
+                break
+            except Exception:
+                continue
+
+    counts["last_run"] = last_run
+    return counts
 
 
 def file_hash(path: Path) -> str:

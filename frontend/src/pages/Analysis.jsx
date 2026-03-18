@@ -1,6 +1,6 @@
 import { useState, useEffect, useMemo } from 'react'
 import { useParams, Link } from 'react-router-dom'
-import { getRun, listPhotos, batchEnhance, batchRename } from '../api/client'
+import { getRun, listPhotos, batchEnhance, batchRename, retryFailed, downloadRunPhotos } from '../api/client'
 import PhotoGrid from '../components/PhotoGrid'
 import PhotoDetail from '../components/PhotoDetail'
 
@@ -21,6 +21,12 @@ function Analysis() {
   const [bulkProgress, setBulkProgress] = useState(null)
   const [bulkStatus, setBulkStatus] = useState(null)
 
+  const [retrying, setRetrying] = useState(false)
+  const [retryStatus, setRetryStatus] = useState(null)
+
+  const [downloading, setDownloading] = useState(false)
+  const [downloadError, setDownloadError] = useState(null)
+
   useEffect(() => {
     async function load() {
       setLoading(true)
@@ -40,6 +46,27 @@ function Analysis() {
     load()
   }, [runId])
 
+  async function handleRetryFailed() {
+    setRetrying(true)
+    setRetryStatus(null)
+    try {
+      const updated = await retryFailed(runId)
+      setRun(updated)
+      const photoData = await listPhotos()
+      setPhotos(photoData.photos || [])
+      const stillFailed = updated.errors?.length || 0
+      const newlyFixed = (run?.errors?.length || 0) - stillFailed
+      setRetryStatus({
+        type: stillFailed > 0 ? 'warning' : 'success',
+        message: `Retry complete. ${newlyFixed} fixed${stillFailed > 0 ? `, ${stillFailed} still failed` : ''}.`,
+      })
+    } catch (err) {
+      setRetryStatus({ type: 'error', message: `Retry failed: ${err.message}` })
+    } finally {
+      setRetrying(false)
+    }
+  }
+
   useEffect(() => {
     setSelectedIds(new Set())
     setBulkStatus(null)
@@ -48,10 +75,18 @@ function Analysis() {
   const results = run?.results || []
   const runErrors = run?.errors || []
 
+  // Match run results to on-disk photos by FILENAME (IDs can differ across environments/restarts)
   const analyzedPhotos = useMemo(() => {
-    const ids = new Set(results.map(r => r.image_id))
-    return photos.filter(p => ids.has(p.id))
+    const filenames = new Set(results.map(r => r.filename))
+    return photos.filter(p => filenames.has(p.filename))
   }, [photos, results])
+
+  // Build a filename→result lookup for passing to PhotoDetail
+  const resultByFilename = useMemo(() => {
+    const map = {}
+    results.forEach(r => { map[r.filename] = r })
+    return map
+  }, [results])
 
   const shortlistPhotos = useMemo(
     () => analyzedPhotos.filter(p => shortlistIds.has(p.id)),
@@ -71,7 +106,8 @@ function Analysis() {
 
   function handlePhotoClick(photo, result) {
     setSelectedPhoto(photo)
-    setSelectedResult(result)
+    // Prefer the passed result; fall back to filename lookup (handles ID mismatch across environments)
+    setSelectedResult(result || resultByFilename[photo.filename] || null)
   }
 
   function toggleSelection(photoId) {
@@ -108,6 +144,18 @@ function Analysis() {
       return next
     })
     setSelectedIds(new Set())
+  }
+
+  async function handleDownload(ids = null) {
+    setDownloading(true)
+    setDownloadError(null)
+    try {
+      await downloadRunPhotos(runId, ids, 'analyzed')
+    } catch (err) {
+      setDownloadError(err.message)
+    } finally {
+      setDownloading(false)
+    }
   }
 
   async function handleBulkAction(action) {
@@ -189,8 +237,24 @@ function Analysis() {
             Run: {run.run_id} &middot; Model: {run.model} &middot; {results.length} photos analyzed
           </p>
         </div>
-        <Link to="/" className="btn btn-secondary">Back to Dashboard</Link>
+        <div className="page-header-actions">
+          <button
+            className="btn btn-primary"
+            onClick={() => handleDownload(null)}
+            disabled={downloading || results.length === 0}
+            title={`Download all ${results.length} analyzed photos as ZIP`}
+          >
+            {downloading ? 'Preparing ZIP...' : `Download All (${results.length})`}
+          </button>
+          <Link to="/" className="btn btn-secondary">Back to Dashboard</Link>
+        </div>
       </div>
+      {downloadError && (
+        <div className="alert alert-error">
+          <strong>Download failed:</strong> {downloadError}
+          <button onClick={() => setDownloadError(null)} className="alert-dismiss">Dismiss</button>
+        </div>
+      )}
 
       <div className="stats-row">
         <div className="stat-card">
@@ -228,14 +292,38 @@ function Analysis() {
       )}
 
       {runErrors.length > 0 && (
-        <details className="section">
-          <summary><h2 className="text-error" style={{ display: 'inline' }}>Errors ({runErrors.length})</h2></summary>
-          <div className="error-list" style={{ marginTop: 10 }}>
-            {runErrors.map((err, i) => (
-              <div key={i} className="error-item">
-                <strong>{err.filename}</strong>: {err.error}
-              </div>
-            ))}
+        <details className="section" open>
+          <summary>
+            <h2 className="text-error" style={{ display: 'inline' }}>
+              Errors ({runErrors.length})
+            </h2>
+          </summary>
+          <div style={{ marginTop: 10 }}>
+            <div className="error-list">
+              {runErrors.map((err, i) => (
+                <div key={i} className="error-item">
+                  <strong>{err.filename}</strong>: {err.error}
+                </div>
+              ))}
+            </div>
+            <div style={{ marginTop: 12, display: 'flex', alignItems: 'center', gap: 12 }}>
+              <button
+                className="btn btn-primary"
+                onClick={handleRetryFailed}
+                disabled={retrying}
+              >
+                {retrying ? 'Retrying...' : `Retry Failed (${runErrors.length})`}
+              </button>
+              {retryStatus && (
+                <span className={`action-status ${
+                  retryStatus.type === 'success' ? 'action-success'
+                    : retryStatus.type === 'warning' ? 'action-warning'
+                      : 'action-error'
+                }`} style={{ display: 'inline' }}>
+                  {retryStatus.message}
+                </span>
+              )}
+            </div>
           </div>
         </details>
       )}
@@ -321,6 +409,15 @@ function Analysis() {
               title="Save photos to processed/ renamed to their recommended Lightroom preset"
             >
               Rename to Preset
+            </button>
+            <div className="fab-divider" />
+            <button
+              className="btn btn-primary btn-small"
+              onClick={() => handleDownload([...selectedIds])}
+              disabled={bulkRunning || downloading}
+              title="Download selected photos as ZIP"
+            >
+              {downloading ? 'Zipping...' : `Download (${selectedIds.size})`}
             </button>
             {activeTab === 'all' && (
               <>

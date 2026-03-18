@@ -128,6 +128,13 @@ body {
   letter-spacing: -0.5px;
 }
 
+.page-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
+}
+
 .page-subtitle {
   color: var(--text-secondary);
   margin-top: 4px;
@@ -2515,4 +2522,213 @@ body {
   .tool-tabs {
     overflow-x: auto;
   }
+}
+
+/* ── Analysis progress ──────────────────────────────────────────────── */
+
+.analysis-progress {
+  margin-top: 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.analysis-progress-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  font-size: 0.85rem;
+  color: var(--text-secondary);
+}
+
+.analysis-progress-label {
+  font-weight: 500;
+  color: var(--text-primary);
+}
+
+.analysis-progress-pct {
+  font-weight: 600;
+  color: var(--accent);
+}
+
+.analysis-progress-track {
+  height: 8px;
+  background: var(--bg-main);
+  border-radius: 99px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+}
+
+.analysis-progress-fill {
+  height: 100%;
+  background: var(--accent);
+  border-radius: 99px;
+  transition: width 0.6s ease;
+}
+
+.analysis-progress-errors {
+  font-size: 0.8rem;
+  color: var(--error, #e05);
+  margin: 0;
+}
+
+.analysis-log {
+  margin-top: 0.25rem;
+  background: var(--bg-main);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 0.5rem 0.75rem;
+  max-height: 160px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.analysis-log-line {
+  font-size: 0.75rem;
+  font-family: monospace;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.analysis-log-error {
+  color: var(--error, #e05);
+}
+
+/* ── Folder Counts (Dashboard lifecycle pipeline) ────────────────────── */
+.folder-counts-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 24px;
+  flex-wrap: wrap;
+}
+
+.folder-count-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 14px 20px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  background: var(--bg-card);
+  min-width: 90px;
+}
+
+.folder-count-value {
+  font-size: 1.8rem;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.folder-count-label {
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-secondary);
+  margin-top: 4px;
+}
+
+.folder-count-to-process .folder-count-value { color: var(--accent); }
+.folder-count-analyzed .folder-count-value { color: var(--success); }
+.folder-count-errored { border-color: var(--error); }
+.folder-count-errored .folder-count-value { color: var(--error); }
+.folder-count-last-run { border-color: #7c3aed; opacity: 0.75; }
+.folder-count-last-run .folder-count-value { color: #c084fc; }
+.folder-count-errors { color: var(--error); font-weight: 600; }
+.folder-count-divider {
+  width: 1px;
+  height: 40px;
+  background: var(--border);
+  margin: 0 4px;
+  align-self: center;
+}
+
+.folder-count-arrow {
+  color: var(--text-muted);
+  font-size: 1rem;
+  user-select: none;
+}
+
+.folder-count-arrow-error {
+  color: var(--warning);
+}
+
+/* ── View Mode Toggle Bar (PhotoDetail compare UI) ───────────────────── */
+.view-mode-bar {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: wrap;
+  background: var(--bg-secondary);
+  padding: 6px 8px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+}
+
+.view-mode-btn {
+  padding: 5px 14px;
+  border-radius: 6px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 0.82rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s, border-color 0.12s;
+  white-space: nowrap;
+}
+
+.view-mode-btn:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.view-mode-btn-active {
+  background: var(--accent);
+  color: #fff;
+  border-color: var(--accent);
+}
+
+.view-mode-btn-active:hover {
+  background: var(--accent-hover);
+}
+
+.view-mode-hint {
+  font-size: 0.72rem;
+  color: var(--text-muted);
+  margin-left: 6px;
+  white-space: nowrap;
+}
+
+/* ── Blur preset preview loading overlay ─────────────────────────────── */
+.preset-card-blur-loading {
+  position: absolute;
+  inset: 0;
+  background: rgba(0,0,0,0.6);
+  color: #fff;
+  font-size: 0.75rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius);
+  text-align: center;
+  padding: 8px;
+}
+
+.preset-card-preview {
+  position: relative;
+}
+
+/* ── action-warning helper ───────────────────────────────────────────── */
+.action-warning {
+  background: rgba(251, 191, 36, 0.12);
+  border: 1px solid var(--warning);
+  color: var(--warning);
+  padding: 10px 14px;
+  border-radius: var(--radius);
+  font-size: 0.85rem;
 }

@@ -15,7 +15,7 @@ from PIL import Image
 from pydantic import BaseModel
 
 from backend import config
-from backend.images.scanner import scan_image_paths, get_image_info
+from backend.images.scanner import scan_image_paths, scan_all_image_paths, get_image_info, count_photos_by_folder
 from backend.images.thumbnails import get_or_create_thumbnail
 from backend.images.processor import fix_orientation
 from backend.images.editor import apply_adjustments, crop_image, parse_all_sliders
@@ -36,7 +36,7 @@ def _photo_id(path: Path) -> str:
 
 
 def _find_photo(photo_id: str) -> Path | None:
-    for path in scan_image_paths():
+    for path in scan_all_image_paths():
         if _photo_id(path) == photo_id:
             return path
     return None
@@ -48,21 +48,38 @@ def _sanitize_preset_name(name: str) -> str:
     return "_".join(part for part in cleaned.split() if part)
 
 
-def _get_preset_filename(photo_id: str, run_id: str | None) -> str | None:
+def _get_preset_filename(photo_id: str, run_id: str | None, filename: str | None = None) -> str | None:
     """Look up the top preset recommendation for a photo from a run and return a sanitized filename."""
-    import json
     if not run_id:
         return None
+    run_result = _find_run_result(run_id, photo_id, filename)
+    if not run_result:
+        return None
+    rec = run_result.get("preset_recommendation")
+    if rec and rec.get("preset", {}).get("name"):
+        return _sanitize_preset_name(rec["preset"]["name"])
+    return None
+
+
+def _find_run_result(run_id: str, photo_id: str, filename: str | None = None) -> dict | None:
+    """
+    Look up a photo's result in a run JSON.
+    Tries image_id first; falls back to filename match so results survive
+    path changes across environments or server restarts.
+    """
+    import json as _json
     run_path = config.RUNS_DIR / f"{run_id}.json"
     if not run_path.exists():
         return None
     with open(run_path, "r") as f:
-        run_data = json.load(f)
+        run_data = _json.load(f)
     for r in run_data.get("results", []):
         if r.get("image_id") == photo_id:
-            rec = r.get("preset_recommendation")
-            if rec and rec.get("preset", {}).get("name"):
-                return _sanitize_preset_name(rec["preset"]["name"])
+            return r
+    if filename:
+        for r in run_data.get("results", []):
+            if r.get("filename") == filename:
+                return r
     return None
 
 
@@ -87,7 +104,8 @@ MEDIA_TYPES = {
 @router.get("/photos")
 async def list_photos():
     config.INPUT_DIR.mkdir(parents=True, exist_ok=True)
-    paths = scan_image_paths()
+    config.ANALYZED_DIR.mkdir(parents=True, exist_ok=True)
+    paths = scan_image_paths(include_analyzed=True)
     photos = []
 
     for path in paths:
@@ -117,6 +135,12 @@ async def list_photos():
     return {"photos": photos, "total": len(photos)}
 
 
+@router.get("/photos/folder-counts")
+async def folder_counts():
+    """Return photo counts per lifecycle folder (to_process, analyzed, errored, processed)."""
+    return count_photos_by_folder()
+
+
 @router.get("/photos/{photo_id}/full")
 async def get_full_photo(photo_id: str):
     """Serve the full image with EXIF rotation already applied."""
@@ -142,7 +166,7 @@ async def get_full_photo(photo_id: str):
 @router.get("/photos/count")
 async def photo_count():
     config.INPUT_DIR.mkdir(parents=True, exist_ok=True)
-    return {"count": len(scan_image_paths())}
+    return {"count": len(scan_image_paths(include_analyzed=True))}
 
 
 ALLOWED_UPLOAD_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".heic", ".tiff", ".bmp"}
@@ -564,7 +588,7 @@ async def process_photo(photo_id: str, req: ProcessPhotoRequest):
 
         preset_stem = None
         if req.rename_to_preset:
-            preset_stem = _get_preset_filename(photo_id, req.run_id)
+            preset_stem = _get_preset_filename(photo_id, req.run_id, path.name)
 
         def _make_out_path(base_name: str) -> Path:
             if req.output_filename:
@@ -770,11 +794,16 @@ UPSCALE_PROMPTS = {
         "original but with higher resolution and sharper detail."
     ),
     "enhance": (
-        "Upscale and enhance this photo to higher resolution. "
-        "Improve clarity, sharpness, and overall quality to make it look "
-        "like it was taken with a professional camera. You may subtly improve "
-        "lighting, color balance, and detail to achieve a polished, natural result. "
-        "Preserve the original composition, subject, and content."
+        "Enhance this portrait photo to professional quality. Preserve 100% of the original "
+        "identity — face structure, expression, pose, clothing, and background must remain "
+        "unchanged. Recover fine detail: sharp facial features, natural skin texture with "
+        "visible pores, realistic hair strands, and clean edges. Apply balanced cinematic "
+        "lighting with improved dynamic range — lift shadows slightly, recover highlights, "
+        "without relighting or reshaping. Remove compression artifacts and digital noise. "
+        "Apply controlled sharpening. Do NOT smooth skin artificially, do NOT alter facial "
+        "anatomy, do NOT change colors dramatically. Output should read as a true-to-life "
+        "photorealistic enhancement — the same photo, only clearer, sharper, and higher "
+        "resolution."
     ),
 }
 
@@ -884,10 +913,77 @@ async def upscale_preview(photo_id: str, req: UpscalePreviewRequest = None):
         )
 
 
+@router.post("/photos/{photo_id}/blur-preview")
+async def blur_preview(photo_id: str):
+    """
+    Generate a Gemini AI background-blur preview for the Blur Background > Subtle preset.
+    Returns JPEG bytes — does NOT save to disk.
+    """
+    from fastapi.responses import Response as RawResponse
+
+    path = _find_photo(photo_id)
+    if not path or not path.exists():
+        raise HTTPException(status_code=404, detail="Photo not found")
+
+    try:
+        img = Image.open(path)
+        img = fix_orientation(img)
+        img = img.convert("RGB")
+
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=95)
+        img.close()
+
+        from google import genai
+        from google.genai import types
+
+        api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+        if not api_key:
+            raise HTTPException(status_code=500, detail="No API key configured")
+
+        blur_prompt = (
+            "Apply a professional background blur (bokeh/portrait mode) to this photo. "
+            "Keep the main subject (person) perfectly sharp and in focus. "
+            "Blur only the background behind the subject using a natural shallow depth-of-field effect. "
+            "Do not alter the subject's appearance, colors, or the overall composition. "
+            "The result should look like it was taken with a professional camera in portrait mode."
+        )
+
+        client = genai.Client(api_key=api_key)
+        response = client.models.generate_content(
+            model=config.EDIT_MODEL,
+            contents=[types.Content(
+                role="user",
+                parts=[
+                    types.Part.from_bytes(data=buf.getvalue(), mime_type="image/jpeg"),
+                    types.Part.from_text(text=blur_prompt),
+                ],
+            )],
+            config=types.GenerateContentConfig(response_modalities=["IMAGE", "TEXT"]),
+        )
+
+        image_data = None
+        try:
+            for part in response.candidates[0].content.parts:
+                if hasattr(part, "inline_data") and part.inline_data:
+                    image_data = part.inline_data.data
+                    break
+        except (IndexError, AttributeError):
+            pass
+
+        if not image_data:
+            raise HTTPException(status_code=500, detail="Gemini returned no image for blur preview")
+
+        return RawResponse(content=image_data, media_type="image/jpeg")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Blur preview failed: {e}")
+
+
 @router.get("/photos/{photo_id}/crop-recommendation")
 async def get_crop_recommendation_endpoint(photo_id: str, run_id: str = None):
     """Return 2-3 crop options for a photo based on its analysis metadata."""
-    import json
     from backend.analysis.crop_matcher import get_crop_options
 
     path = _find_photo(photo_id)
@@ -897,14 +993,9 @@ async def get_crop_recommendation_endpoint(photo_id: str, run_id: str = None):
     info = get_image_info(path)
     metadata = {}
     if run_id:
-        run_path = config.RUNS_DIR / f"{run_id}.json"
-        if run_path.exists():
-            with open(run_path, "r") as f:
-                run_data = json.load(f)
-            for r in run_data.get("results", []):
-                if r.get("image_id") == photo_id:
-                    metadata = r.get("metadata", {})
-                    break
+        run_result = _find_run_result(run_id, photo_id, path.name)
+        if run_result:
+            metadata = run_result.get("metadata", {})
 
     options = get_crop_options(
         metadata,
@@ -923,7 +1014,6 @@ async def get_preset_recommendation(photo_id: str, run_id: str = None):
     """
     Return the top 3 preset recommendations for a photo based on its analysis metadata.
     """
-    import json
     from backend.analysis.preset_matcher import get_recommendations, get_danger_zones
 
     path = _find_photo(photo_id)
@@ -932,14 +1022,9 @@ async def get_preset_recommendation(photo_id: str, run_id: str = None):
 
     metadata = None
     if run_id:
-        run_path = config.RUNS_DIR / f"{run_id}.json"
-        if run_path.exists():
-            with open(run_path, "r") as f:
-                run_data = json.load(f)
-            for r in run_data.get("results", []):
-                if r.get("image_id") == photo_id:
-                    metadata = r.get("metadata")
-                    break
+        run_result = _find_run_result(run_id, photo_id, path.name)
+        if run_result:
+            metadata = run_result.get("metadata")
 
     recs = get_recommendations(metadata or {}, max_results=3)
     dangers = get_danger_zones()
@@ -985,7 +1070,7 @@ async def batch_rename(req: BatchRenameRequest):
             errors.append({"photo_id": pid, "error": "Photo not found"})
             continue
 
-        preset_stem = _get_preset_filename(pid, req.run_id)
+        preset_stem = _get_preset_filename(pid, req.run_id, path.name)
         if not preset_stem:
             errors.append({"photo_id": pid, "error": "No preset recommendation found"})
             continue
@@ -1081,7 +1166,7 @@ async def batch_enhance(req: BatchEnhanceRequest):
 
             preset_stem = None
             if req.rename_to_preset:
-                preset_stem = _get_preset_filename(pid, req.run_id)
+                preset_stem = _get_preset_filename(pid, req.run_id, path.name)
 
             def _batch_out_path(fallback_name: str) -> Path:
                 if preset_stem:

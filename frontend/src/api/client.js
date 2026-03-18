@@ -203,14 +203,34 @@ export async function listProcessed() {
   return get('/processed')
 }
 
+export async function blurPreviewUrl(photoId) {
+  const response = await fetch(`${API_BASE}/photos/${photoId}/blur-preview`, {
+    method: 'POST',
+  })
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ detail: response.statusText }))
+    throw new Error(error.detail || 'Blur preview failed')
+  }
+  const blob = await response.blob()
+  return URL.createObjectURL(blob)
+}
+
 // ── Analysis endpoints ──────────────────────────────────────────────────
 
 export async function analyzeSingle(photoId, model) {
   return post('/analyze/single', { photo_id: photoId, model })
 }
 
-export async function analyzeBatch(model, limit) {
-  return post('/analyze/batch', { model, limit })
+export async function analyzeBatch(model, limit, allFolders = false) {
+  return post('/analyze/batch', { model, limit, all_folders: allFolders || undefined })
+}
+
+export async function retryFailed(runId) {
+  return post(`/analyze/retry/${runId}`)
+}
+
+export async function getAnalysisProgress() {
+  return get('/analyze/batch/progress')
 }
 
 export async function listRuns() {
@@ -219,6 +239,29 @@ export async function listRuns() {
 
 export async function getRun(runId) {
   return get(`/runs/${runId}`)
+}
+
+export async function downloadRunPhotos(runId, photoIds = null, folder = 'analyzed') {
+  const params = new URLSearchParams({ folder })
+  if (photoIds && photoIds.length > 0) {
+    params.set('photo_ids', photoIds.join(','))
+  }
+  const url = `${API_BASE}/runs/${runId}/download?${params}`
+  const response = await fetch(url)
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({ detail: response.statusText }))
+    throw new Error(err.detail || `Download failed: ${response.status}`)
+  }
+  const blob = await response.blob()
+  const a = document.createElement('a')
+  a.href = URL.createObjectURL(blob)
+  a.download = `run_${runId}_photos.zip`
+  a.click()
+  URL.revokeObjectURL(a.href)
+}
+
+export async function getFolderCounts() {
+  return get('/photos/folder-counts')
 }
 
 // ── Model endpoints ─────────────────────────────────────────────────────

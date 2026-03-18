@@ -27,13 +27,14 @@
  */
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { listPhotos, analyzeBatch, listRuns, uploadPhotos } from '../api/client'
+import { listPhotos, analyzeBatch, listRuns, uploadPhotos, getAnalysisProgress, getFolderCounts } from '../api/client'
 import PhotoGrid from '../components/PhotoGrid'
 import ModelSelector from '../components/ModelSelector'
 import CostEstimate from '../components/CostEstimate'
 
 function Dashboard() {
   const [photos, setPhotos] = useState([])
+  const [folderCounts, setFolderCounts] = useState(null)
   const [model, setModel] = useState(null)
   const [loading, setLoading] = useState(true)
   const [analyzing, setAnalyzing] = useState(false)
@@ -47,11 +48,21 @@ function Dashboard() {
   const [dragOver, setDragOver] = useState(false)
   const fileInputRef = useRef(null)
 
+  const [analysisProgress, setAnalysisProgress] = useState(null)
+  const progressPollRef = useRef(null)
+
   const navigate = useNavigate()
 
   useEffect(() => {
     loadPhotos()
     loadRuns()
+    loadFolderCounts()
+    // Clean up poll interval if Dashboard unmounts while analysis is running
+    return () => {
+      if (progressPollRef.current) {
+        clearInterval(progressPollRef.current)
+      }
+    }
   }, [])
 
   async function loadPhotos() {
@@ -67,6 +78,15 @@ function Dashboard() {
     }
   }
 
+  async function loadFolderCounts() {
+    try {
+      const counts = await getFolderCounts()
+      setFolderCounts(counts)
+    } catch {
+      // non-critical
+    }
+  }
+
   async function loadRuns() {
     try {
       const data = await listRuns()
@@ -78,15 +98,29 @@ function Dashboard() {
 
   async function handleAnalyze() {
     setAnalyzing(true)
+    setAnalysisProgress(null)
     setError(null)
+
+    // Start polling for progress every 1.5 seconds
+    progressPollRef.current = setInterval(async () => {
+      try {
+        const p = await getAnalysisProgress()
+        if (p.status !== 'idle') setAnalysisProgress(p)
+      } catch {
+        // ignore poll errors
+      }
+    }, 1500)
+
     try {
       const limit = batchLimit > 0 ? batchLimit : undefined
       const result = await analyzeBatch(model, limit)
-      // Redirect to the analysis results page
+      clearInterval(progressPollRef.current)
       navigate(`/analysis/${result.run_id}`)
     } catch (err) {
+      clearInterval(progressPollRef.current)
       setError(err.message)
       setAnalyzing(false)
+      setAnalysisProgress(null)
     }
   }
 
@@ -194,6 +228,43 @@ function Dashboard() {
         </div>
       )}
 
+      {folderCounts && (
+        <div className="folder-counts-row">
+          <div className="folder-count-card folder-count-to-process">
+            <div className="folder-count-value">{folderCounts.to_process}</div>
+            <div className="folder-count-label">To Process</div>
+          </div>
+          <div className="folder-count-arrow">→</div>
+          <div className="folder-count-card folder-count-analyzed">
+            <div className="folder-count-value">{folderCounts.analyzed}</div>
+            <div className="folder-count-label">Analyzed</div>
+          </div>
+          {folderCounts.errored > 0 && (
+            <>
+              <div className="folder-count-arrow folder-count-arrow-error">⚠</div>
+              <div className="folder-count-card folder-count-errored">
+                <div className="folder-count-value">{folderCounts.errored}</div>
+                <div className="folder-count-label">Errored</div>
+              </div>
+            </>
+          )}
+          {folderCounts.last_run && (
+            <>
+              <div className="folder-count-divider" />
+              <div className="folder-count-card folder-count-last-run">
+                <div className="folder-count-value">{folderCounts.last_run.total_analyzed}</div>
+                <div className="folder-count-label">
+                  Last Run
+                  {folderCounts.last_run.total_errors > 0 && (
+                    <span className="folder-count-errors"> ({folderCounts.last_run.total_errors} errors)</span>
+                  )}
+                </div>
+              </div>
+            </>
+          )}
+        </div>
+      )}
+
       <div className="dashboard-controls">
         <div className="control-card">
           <h2>Photos</h2>
@@ -203,7 +274,7 @@ function Dashboard() {
             <>
               <div className="stat-big">{photoCount}</div>
               <p className="muted">photos in to_process/</p>
-              <button onClick={loadPhotos} className="btn btn-secondary">
+              <button onClick={() => { loadPhotos(); loadFolderCounts() }} className="btn btn-secondary">
                 Refresh
               </button>
             </>
@@ -249,10 +320,46 @@ function Dashboard() {
           >
             {analyzing ? 'Analyzing...' : `Analyze ${batchLimit > 0 ? batchLimit : photoCount} Photos`}
           </button>
-          {analyzing && (
-            <p className="muted">
-              This may take a minute. Results will appear when ready.
-            </p>
+          {analyzing && analysisProgress && (
+            <div className="analysis-progress">
+              <div className="analysis-progress-header">
+                <span className="analysis-progress-label">
+                  {analysisProgress.completed} / {analysisProgress.total} photos
+                </span>
+                <span className="analysis-progress-pct">
+                  {analysisProgress.total > 0
+                    ? Math.round((analysisProgress.completed / analysisProgress.total) * 100)
+                    : 0}%
+                </span>
+              </div>
+              <div className="analysis-progress-track">
+                <div
+                  className="analysis-progress-fill"
+                  style={{
+                    width: analysisProgress.total > 0
+                      ? `${(analysisProgress.completed / analysisProgress.total) * 100}%`
+                      : '0%'
+                  }}
+                />
+              </div>
+              {analysisProgress.errors > 0 && (
+                <p className="analysis-progress-errors">
+                  {analysisProgress.errors} error{analysisProgress.errors !== 1 ? 's' : ''}
+                </p>
+              )}
+              {analysisProgress.log && analysisProgress.log.length > 0 && (
+                <div className="analysis-log">
+                  {[...analysisProgress.log].reverse().slice(0, 8).map((line, i) => (
+                    <div key={i} className={`analysis-log-line ${line.startsWith('✗') ? 'analysis-log-error' : ''}`}>
+                      {line}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+          {analyzing && !analysisProgress && (
+            <p className="muted">Starting analysis...</p>
           )}
         </div>
       </div>

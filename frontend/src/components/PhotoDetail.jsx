@@ -6,6 +6,7 @@ import {
   getPresetRecommendation,
   getCropOptions,
   upscalePreviewUrl,
+  blurPreviewUrl,
 } from '../api/client'
 
 const UPSCALE_STEPS = [
@@ -24,32 +25,39 @@ const PROMPTS = {
     'mood, or style in any way. The result should look identical to the ' +
     'original but with higher resolution and sharper detail.',
   enhance:
-    'Upscale and enhance this photo to higher resolution. ' +
-    'Improve clarity, sharpness, and overall quality to make it look ' +
-    'like it was taken with a professional camera. You may subtly improve ' +
-    'lighting, color balance, and detail to achieve a polished, natural result. ' +
-    'Preserve the original composition, subject, and content.',
+    'Enhance this portrait photo to professional quality. Preserve 100% of the original ' +
+    'identity — face structure, expression, pose, clothing, and background must remain ' +
+    'unchanged. Recover fine detail: sharp facial features, natural skin texture with ' +
+    'visible pores, realistic hair strands, and clean edges. Apply balanced cinematic ' +
+    'lighting with improved dynamic range — lift shadows slightly, recover highlights, ' +
+    'without relighting or reshaping. Remove compression artifacts and digital noise. ' +
+    'Apply controlled sharpening. Do NOT smooth skin artificially, do NOT alter facial ' +
+    'anatomy, do NOT change colors dramatically. Output should read as a true-to-life ' +
+    'photorealistic enhancement — the same photo, only clearer, sharper, and higher ' +
+    'resolution.',
 }
 
 const PRESET_FILTERS = {
-  'Adaptive: Subject > Warm Pop': 'brightness(1.05) contrast(1.08) saturate(1.2) sepia(0.15)',
-  'Adaptive: Subject > Light': 'brightness(1.15) contrast(0.95) saturate(1.05)',
-  'Adaptive: Subject > Vibrant': 'brightness(1.05) contrast(1.1) saturate(1.3)',
-  'Adaptive: Subject > Warm Light': 'brightness(1.1) contrast(1.02) saturate(1.1) sepia(0.1)',
-  'Adaptive: Subject > Pop': 'brightness(1.08) contrast(1.2) saturate(1.15)',
-  'Adaptive: Subject > Balance Contrast': 'brightness(1.02) contrast(1.15)',
-  'Adaptive: Portrait > Polished Portrait': 'brightness(1.05) contrast(1.05) saturate(1.05)',
-  'Adaptive: Portrait > Enhance Portrait': 'brightness(1.08) contrast(1.08) saturate(1.08)',
-  'Adaptive: Portrait > Smooth Facial Skin': 'brightness(1.03) contrast(0.98) saturate(1.02) blur(0.3px)',
-  'Adaptive: Blur Background > Subtle': 'brightness(1.02) contrast(1.05)',
-  'Style: Cinematic': 'brightness(0.95) contrast(1.2) saturate(0.85) sepia(0.08)',
-  'Portraits: Black & White': 'grayscale(1) contrast(1.15) brightness(1.05)',
-  'Portraits: Group': 'brightness(1.05) contrast(1.05) saturate(1.05)',
-  'Adaptive: Sky > Blue Pop': 'brightness(1.05) contrast(1.1) saturate(1.25)',
+  'Adaptive: Subject > Warm Pop': 'brightness(1.06) saturate(1.25) sepia(0.18) contrast(1.05)',
+  'Adaptive: Subject > Light': 'brightness(1.2) contrast(0.92) saturate(1.05)',
+  'Adaptive: Subject > Vibrant': 'saturate(1.4) contrast(1.08) brightness(1.03)',
+  'Adaptive: Subject > Warm Light': 'brightness(1.12) saturate(1.12) sepia(0.14) contrast(0.98)',
+  'Adaptive: Subject > Pop': 'brightness(1.1) contrast(1.18) saturate(1.1)',
+  'Adaptive: Subject > Balance Contrast': 'brightness(1.02) contrast(1.12) saturate(1.0)',
+  'Adaptive: Portrait > Polished Portrait': 'brightness(1.04) contrast(1.04) saturate(1.04)',
+  'Adaptive: Portrait > Enhance Portrait': 'brightness(1.1) contrast(1.1) saturate(1.08) hue-rotate(2deg)',
+  'Adaptive: Portrait > Smooth Facial Skin': 'brightness(1.02) contrast(0.95) saturate(1.0) blur(0.5px)',
+  'Adaptive: Blur Background > Subtle': null,
+  'Style: Cinematic': 'brightness(0.93) contrast(1.22) saturate(0.82) sepia(0.06) hue-rotate(-5deg)',
+  'Portraits: Black & White': 'grayscale(1) contrast(1.18) brightness(1.04)',
+  'Portraits: Group': 'brightness(1.05) contrast(1.06) saturate(1.06)',
+  'Adaptive: Sky > Blue Pop': 'saturate(1.3) contrast(1.1) brightness(1.02) hue-rotate(-8deg)',
 }
 
+const BLUR_PRESET_NAME = 'Adaptive: Blur Background > Subtle'
+
 function getFilterForPreset(presetName) {
-  if (PRESET_FILTERS[presetName]) return PRESET_FILTERS[presetName]
+  if (presetName in PRESET_FILTERS) return PRESET_FILTERS[presetName]
   const lower = presetName.toLowerCase()
   if (lower.includes('warm')) return 'brightness(1.08) saturate(1.15) sepia(0.12)'
   if (lower.includes('cinematic') || lower.includes('moody')) return 'brightness(0.95) contrast(1.2) saturate(0.85)'
@@ -83,15 +91,23 @@ function PhotoDetail({ photo, result, runId, onClose }) {
   const [upscaleStep, setUpscaleStep] = useState('')
   const stepTimers = useRef([])
 
-  const [compareMode, setCompareMode] = useState(false)
+  // Clean up step timers when the modal unmounts (prevents state updates on unmounted component)
+  useEffect(() => {
+    return () => {
+      stepTimers.current.forEach(t => clearTimeout(t))
+    }
+  }, [])
+
+  // Compare mode: 'original' | 'clarity' | 'enhance'
+  const [viewMode, setViewMode] = useState('enhance')
   const [claritySrc, setClaritySrc] = useState(null)
   const [enhanceSrc, setEnhanceSrc] = useState(null)
   const [selectedUpscaleForSave, setSelectedUpscaleForSave] = useState(null)
 
-  const [presetPreviewMode, setPresetPreviewMode] = useState('none')
   const [presetPreviewFilter, setPresetPreviewFilter] = useState(null)
+  const [blurPreviewSrc, setBlurPreviewSrc] = useState(null)
+  const [blurPreviewLoading, setBlurPreviewLoading] = useState(false)
 
-  const [showOriginal, setShowOriginal] = useState(false)
   const [appliedAdjustments, setAppliedAdjustments] = useState(null)
   const [filename, setFilename] = useState('')
   const [saving, setSaving] = useState(false)
@@ -176,11 +192,50 @@ function PhotoDetail({ photo, result, runId, onClose }) {
     setStatus(null)
   }
 
+  async function applyCompareBoth() {
+    setUpscaleLoading(true)
+    setUpscaleStep('Running Clarity and Enhance in parallel...')
+    setStatus(null)
+    setUpscaleSrc(null)
+    setClaritySrc(null)
+    setEnhanceSrc(null)
+
+    stepTimers.current.forEach(t => clearTimeout(t))
+    stepTimers.current = UPSCALE_STEPS.slice(1).map(step =>
+      setTimeout(() => setUpscaleStep(step.text), step.at)
+    )
+
+    const hasCrop = appliedCrop && !(appliedCrop.x === 0 && appliedCrop.y === 0 && appliedCrop.w === 100 && appliedCrop.h === 100)
+    const opts = { crop: hasCrop ? appliedCrop : null, adjustments: appliedAdjustments }
+
+    try {
+      const [clarityUrl, enhanceUrl] = await Promise.all([
+        upscalePreviewUrl(photo.id, { ...opts, mode: 'clarity' }),
+        upscalePreviewUrl(photo.id, { ...opts, mode: 'enhance' }),
+      ])
+      setClaritySrc(clarityUrl)
+      setEnhanceSrc(enhanceUrl)
+      setUpscaleApplied(true)
+      setViewMode('enhance')
+      setSelectedUpscaleForSave('enhance')
+      setStatus({
+        type: 'success',
+        message: 'Both modes ready — click Original / Clarity / Full Enhance to compare.',
+      })
+    } catch (err) {
+      setStatus({ type: 'error', message: `Compare failed: ${err.message}` })
+    } finally {
+      stepTimers.current.forEach(t => clearTimeout(t))
+      stepTimers.current = []
+      setUpscaleLoading(false)
+      setUpscaleStep('')
+    }
+  }
+
   async function applyUpscale() {
     setUpscaleLoading(true)
     setUpscaleStep(UPSCALE_STEPS[0].text)
     setStatus(null)
-    setCompareMode(false)
     setClaritySrc(null)
     setEnhanceSrc(null)
 
@@ -198,10 +253,11 @@ function PhotoDetail({ photo, result, runId, onClose }) {
       })
       setUpscaleSrc(url)
       setUpscaleApplied(true)
+      setViewMode(upscaleMode)
       setSelectedUpscaleForSave(upscaleMode)
       setStatus({
         type: 'success',
-        message: `Enhancement applied (${upscaleMode === 'clarity' ? 'Clarity Only' : 'Full Enhance'}). Hold "Compare" to see original.`,
+        message: `Enhancement applied (${upscaleMode === 'clarity' ? 'Clarity Only' : 'Full Enhance'}).`,
       })
     } catch (err) {
       setStatus({ type: 'error', message: `Enhancement failed: ${err.message}` })
@@ -213,51 +269,28 @@ function PhotoDetail({ photo, result, runId, onClose }) {
     }
   }
 
-  async function applyCompareBoth() {
-    setUpscaleLoading(true)
-    setUpscaleStep('Running Clarity and Enhance in parallel...')
-    setStatus(null)
-    setUpscaleSrc(null)
-    setClaritySrc(null)
-    setEnhanceSrc(null)
-
-    const hasCrop = appliedCrop && !(appliedCrop.x === 0 && appliedCrop.y === 0 && appliedCrop.w === 100 && appliedCrop.h === 100)
-    const opts = { crop: hasCrop ? appliedCrop : null, adjustments: appliedAdjustments }
-
-    try {
-      const [clarityUrl, enhanceUrl] = await Promise.all([
-        upscalePreviewUrl(photo.id, { ...opts, mode: 'clarity' }),
-        upscalePreviewUrl(photo.id, { ...opts, mode: 'enhance' }),
-      ])
-      setClaritySrc(clarityUrl)
-      setEnhanceSrc(enhanceUrl)
-      setUpscaleApplied(true)
-      setCompareMode(true)
-      setSelectedUpscaleForSave('enhance')
-      setStatus({
-        type: 'success',
-        message: 'Both modes ready. Compare side-by-side, then pick one to save.',
-      })
-    } catch (err) {
-      setStatus({ type: 'error', message: `Compare failed: ${err.message}` })
-    } finally {
-      setUpscaleLoading(false)
-      setUpscaleStep('')
-    }
-  }
-
   function revertUpscale() {
     setUpscaleApplied(false)
     setUpscaleSrc(null)
     setClaritySrc(null)
     setEnhanceSrc(null)
-    setCompareMode(false)
+    setViewMode('enhance')
     setSelectedUpscaleForSave(null)
     setStatus(null)
   }
 
-  const singleDisplaySrc = showOriginal ? originalSrc : (upscaleSrc || previewSrc || originalSrc)
+  // Pick the right image source for the main view
+  function _getMainSrc() {
+    if (!upscaleApplied) return previewSrc || originalSrc
+    if (viewMode === 'original') return previewSrc || originalSrc
+    if (viewMode === 'clarity') return claritySrc || upscaleSrc || previewSrc || originalSrc
+    if (viewMode === 'enhance') return enhanceSrc || upscaleSrc || previewSrc || originalSrc
+    return previewSrc || originalSrc
+  }
+
+  const mainSrc = _getMainSrc()
   const hasEdits = !!appliedCrop || !!appliedAdjustments || upscaleApplied
+  const hasBothModes = !!(claritySrc && enhanceSrc)
 
   if (!result) {
     return (
@@ -293,86 +326,64 @@ function PhotoDetail({ photo, result, runId, onClose }) {
                 crop={crop}
                 onCropChange={setCrop}
               />
-            ) : compareMode ? (
-              <div className="ai-compare-grid">
-                <div className="ai-compare-cell">
-                  <img src={originalSrc} alt="Original" />
-                  <div className="ai-compare-label">Original</div>
-                </div>
-                <div className="ai-compare-cell">
-                  <img src={claritySrc} alt="Clarity" />
-                  <div className="ai-compare-label">Clarity Only</div>
-                  <button
-                    className={`btn btn-small ${selectedUpscaleForSave === 'clarity' ? 'btn-primary' : 'btn-secondary'}`}
-                    onClick={() => setSelectedUpscaleForSave('clarity')}
-                  >
-                    {selectedUpscaleForSave === 'clarity' ? '✓ Save this' : 'Save this'}
-                  </button>
-                </div>
-                <div className="ai-compare-cell">
-                  <img src={enhanceSrc} alt="Full Enhance" />
-                  <div className="ai-compare-label">Full Enhance</div>
-                  <button
-                    className={`btn btn-small ${selectedUpscaleForSave === 'enhance' ? 'btn-primary' : 'btn-secondary'}`}
-                    onClick={() => setSelectedUpscaleForSave('enhance')}
-                  >
-                    {selectedUpscaleForSave === 'enhance' ? '✓ Save this' : 'Save this'}
-                  </button>
-                </div>
-              </div>
-            ) : presetPreviewMode === 'compare' && recommendations.length > 0 ? (
-              <div className="preset-compare-grid">
-                <div className="preset-compare-cell">
-                  <img src={originalSrc} alt="Original" />
-                  <div className="preset-compare-label">Original</div>
-                </div>
-                {recommendations.slice(0, 3).map((rec, i) => {
-                  const p = rec.preset
-                  if (!p) return null
-                  const cssFilter = getFilterForPreset(p.name)
-                  return (
-                    <div key={rec.id || i} className="preset-compare-cell">
-                      <img src={originalSrc} alt={p.name} style={{ filter: cssFilter }} />
-                      <div className="preset-compare-label">#{i + 1} {p.name}</div>
-                    </div>
-                  )
-                })}
-              </div>
             ) : (
               <div className="photo-compare-wrapper">
                 <img
-                  src={singleDisplaySrc}
+                  src={presetPreviewFilter === '__blur__' ? (blurPreviewSrc || mainSrc) : mainSrc}
                   alt={photo.filename}
-                  style={presetPreviewFilter ? { filter: presetPreviewFilter } : undefined}
+                  style={presetPreviewFilter && presetPreviewFilter !== '__blur__' ? { filter: presetPreviewFilter } : undefined}
                 />
-                {showOriginal && <div className="compare-badge">Original</div>}
               </div>
             )}
 
             <div className="photo-controls-bar">
-              {hasEdits && !cropMode && !compareMode && (
+              {/* View mode toggle buttons — shown when upscale has been applied */}
+              {upscaleApplied && !cropMode && (
+                <div className="view-mode-bar">
+                  <button
+                    className={`view-mode-btn ${viewMode === 'original' ? 'view-mode-btn-active' : ''}`}
+                    onClick={() => setViewMode('original')}
+                  >
+                    Original
+                  </button>
+                  {/* Only show Clarity button if clarity result exists, or single-mode was clarity */}
+                  {(claritySrc || (upscaleSrc && selectedUpscaleForSave === 'clarity')) && (
+                    <button
+                      className={`view-mode-btn ${viewMode === 'clarity' ? 'view-mode-btn-active' : ''}`}
+                      onClick={() => {
+                        setViewMode('clarity')
+                        setSelectedUpscaleForSave('clarity')
+                      }}
+                    >
+                      Clarity
+                    </button>
+                  )}
+                  {/* Only show Full Enhance button if enhance result exists, or single-mode was enhance */}
+                  {(enhanceSrc || (upscaleSrc && selectedUpscaleForSave === 'enhance')) && (
+                    <button
+                      className={`view-mode-btn ${viewMode === 'enhance' ? 'view-mode-btn-active' : ''}`}
+                      onClick={() => {
+                        setViewMode('enhance')
+                        setSelectedUpscaleForSave('enhance')
+                      }}
+                    >
+                      Full Enhance
+                    </button>
+                  )}
+                  {hasBothModes && (
+                    <span className="view-mode-hint">Click to compare — selected version will be saved</span>
+                  )}
+                </div>
+              )}
+
+              {hasEdits && !cropMode && (
                 <div className="preview-badge">
                   {[
                     appliedCrop && 'Cropped',
                     appliedAdjustments && 'Styled',
-                    upscaleApplied && 'Enhanced',
+                    upscaleApplied && (viewMode === 'original' ? 'Viewing Original' : viewMode === 'clarity' ? 'Clarity' : 'Full Enhance'),
                   ].filter(Boolean).join(' + ')}
                 </div>
-              )}
-              {hasEdits && !cropMode && !compareMode && (
-                <button
-                  className="btn btn-small btn-compare"
-                  onMouseDown={() => setShowOriginal(true)}
-                  onMouseUp={() => setShowOriginal(false)}
-                  onMouseLeave={() => setShowOriginal(false)}
-                  onTouchStart={() => setShowOriginal(true)}
-                  onTouchEnd={() => setShowOriginal(false)}
-                >
-                  Hold to Compare
-                </button>
-              )}
-              {compareMode && (
-                <div className="preview-badge">Pick which to save, then click Save below</div>
               )}
             </div>
           </div>
@@ -393,32 +404,30 @@ function PhotoDetail({ photo, result, runId, onClose }) {
                     Based on your photo's detected scenario, here are the best Adaptive presets to apply in Lightroom.
                   </p>
 
-                  <div className="preset-preview-actions">
-                    <button
-                      className={`btn btn-small ${presetPreviewMode === 'compare' ? 'btn-primary' : 'btn-secondary'}`}
-                      onClick={() => {
-                        setPresetPreviewMode(presetPreviewMode === 'compare' ? 'none' : 'compare')
-                        setPresetPreviewFilter(null)
-                      }}
-                    >
-                      {presetPreviewMode === 'compare' ? '✓ Compare all 3 on full image' : 'Compare all 3 on full image'}
-                    </button>
-                  </div>
-
                   {recommendations.map((rec, i) => {
                     const p = rec.preset
                     if (!p) return null
-                    const cssFilter = getFilterForPreset(p.name)
-                    const isPreviewActive = presetPreviewMode === 'single' && presetPreviewFilter === cssFilter
+                    const isBlurPreset = p.name === BLUR_PRESET_NAME
+                    const cssFilter = isBlurPreset ? null : getFilterForPreset(p.name)
+                    const isPreviewActive = presetPreviewFilter === cssFilter && cssFilter !== null
+                    const isBlurActive = isBlurPreset && presetPreviewFilter === '__blur__'
+
                     return (
                       <div key={rec.id || i} className={`preset-card ${i === 0 ? 'preset-card-primary' : ''}`}>
                         <div className="preset-card-rank">#{i + 1}</div>
                         <div className="preset-card-preview">
-                          <img
-                            src={photo.thumbnail_url || originalSrc}
-                            alt={`Preview: ${p.name}`}
-                            style={{ filter: cssFilter }}
-                          />
+                          {isBlurPreset && blurPreviewSrc ? (
+                            <img src={blurPreviewSrc} alt={`Preview: ${p.name}`} />
+                          ) : (
+                            <img
+                              src={photo.thumbnail_url || originalSrc}
+                              alt={`Preview: ${p.name}`}
+                              style={cssFilter ? { filter: cssFilter } : undefined}
+                            />
+                          )}
+                          {isBlurPreset && blurPreviewLoading && (
+                            <div className="preset-card-blur-loading">Generating AI preview...</div>
+                          )}
                         </div>
                         <div className="preset-card-body">
                           <div className="preset-card-header">
@@ -443,20 +452,47 @@ function PhotoDetail({ photo, result, runId, onClose }) {
                             </div>
                           )}
 
-                          <button
-                            className={`btn btn-small preset-preview-full-btn ${isPreviewActive ? 'btn-primary' : ''}`}
-                            onClick={() => {
-                              if (isPreviewActive) {
-                                setPresetPreviewMode('none')
-                                setPresetPreviewFilter(null)
-                              } else {
-                                setPresetPreviewMode('single')
-                                setPresetPreviewFilter(cssFilter)
-                              }
-                            }}
-                          >
-                            {isPreviewActive ? '✓ Previewing full' : 'Preview on full image'}
-                          </button>
+                          {isBlurPreset ? (
+                            <button
+                              className={`btn btn-small preset-preview-full-btn ${isBlurActive ? 'btn-primary' : ''}`}
+                              disabled={blurPreviewLoading}
+                              onClick={async () => {
+                                if (isBlurActive) {
+                                  setPresetPreviewFilter(null)
+                                  return
+                                }
+                                if (blurPreviewSrc) {
+                                  setPresetPreviewFilter('__blur__')
+                                  return
+                                }
+                                setBlurPreviewLoading(true)
+                                try {
+                                  const url = await blurPreviewUrl(photo.id)
+                                  setBlurPreviewSrc(url)
+                                  setPresetPreviewFilter('__blur__')
+                                } catch {
+                                  // silently fail — leave thumbnail as is
+                                } finally {
+                                  setBlurPreviewLoading(false)
+                                }
+                              }}
+                            >
+                              {blurPreviewLoading ? 'Generating...' : isBlurActive ? '✓ Viewing AI blur' : 'Generate AI blur preview'}
+                            </button>
+                          ) : (
+                            <button
+                              className={`btn btn-small preset-preview-full-btn ${isPreviewActive ? 'btn-primary' : ''}`}
+                              onClick={() => {
+                                if (isPreviewActive) {
+                                  setPresetPreviewFilter(null)
+                                } else {
+                                  setPresetPreviewFilter(cssFilter)
+                                }
+                              }}
+                            >
+                              {isPreviewActive ? '✓ Previewing full' : 'Preview on full image'}
+                            </button>
+                          )}
                         </div>
                       </div>
                     )
@@ -558,7 +594,7 @@ function PhotoDetail({ photo, result, runId, onClose }) {
                   {upscaleApplied && (
                     <>
                       <span className="edit-applied-tag">
-                        {compareMode ? 'Compare mode' : 'Applied'}
+                        {hasBothModes ? 'Compare mode' : 'Applied'}
                       </span>
                       <button className="btn btn-small btn-danger" onClick={revertUpscale}>Revert</button>
                     </>
@@ -714,7 +750,7 @@ function PhotoDetail({ photo, result, runId, onClose }) {
     setStatus(null)
     try {
       const hasCrop = appliedCrop && !(appliedCrop.x === 0 && appliedCrop.y === 0 && appliedCrop.w === 100 && appliedCrop.h === 100)
-      const modeToSave = upscaleApplied ? (selectedUpscaleForSave || upscaleMode) : null
+      const modeToSave = upscaleApplied ? (selectedUpscaleForSave || viewMode || upscaleMode) : null
       const res = await processPhoto(photo.id, {
         rotate: true,
         crop: hasCrop ? appliedCrop : null,

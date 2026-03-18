@@ -93,6 +93,15 @@ async def analyze_photo(
     except Exception as e:
         return {"metadata": None, "token_usage": {}, "error": f"Image load failed: {e}"}
 
+    def _parse_retry_delay(err_str: str) -> float:
+        """Extract retryDelay seconds from a Gemini 429 error string. Returns 0 if not found."""
+        import re
+        # The SDK surfaces the error detail which may contain e.g. "retryDelay: '33s'"
+        match = re.search(r"retrydelay['\"]?\s*[:=]\s*['\"]?(\d+(?:\.\d+)?)", err_str)
+        if match:
+            return min(float(match.group(1)), 60.0)
+        return 0.0
+
     async def _call():
         async with client.aio as aclient:
             for attempt in range(3):
@@ -123,12 +132,16 @@ async def analyze_photo(
                     return {"metadata": parsed, "token_usage": usage, "error": None}
                 except Exception as e:
                     err_str = str(e).lower()
-                    retryable = any(
-                        k in err_str
-                        for k in ("429", "500", "resource_exhausted", "internal")
+                    is_rate_limit = "429" in err_str or "resource_exhausted" in err_str
+                    retryable = is_rate_limit or any(
+                        k in err_str for k in ("500", "internal")
                     )
                     if retryable and attempt < 2:
-                        await asyncio.sleep(5 * (attempt + 1))
+                        if is_rate_limit:
+                            delay = _parse_retry_delay(err_str) or (15 * (attempt + 1))
+                        else:
+                            delay = 5 * (attempt + 1)
+                        await asyncio.sleep(delay)
                         continue
                     return {
                         "metadata": None,

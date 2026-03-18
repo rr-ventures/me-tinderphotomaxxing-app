@@ -15,6 +15,14 @@ from backend.analysis.metadata import PhotoMetadata, StyleResult
 FALLBACK_STYLE = "true_to_life_clean"
 
 
+def _count_conditions(rule: dict) -> int:
+    """Return the number of explicit conditions in a rule (higher = more specific)."""
+    conditions = rule.get("if")
+    if conditions == "default" or not isinstance(conditions, dict):
+        return 0
+    return len(conditions)
+
+
 def _matches_rule(metadata: PhotoMetadata, rule: dict) -> bool:
     """Check if a photo's metadata matches a routing rule from the YAML library."""
     conditions = rule.get("if")
@@ -49,20 +57,26 @@ def select_styles(metadata: PhotoMetadata) -> StyleResult:
     """
     Run the routing logic against photo metadata.
 
-    Checks each rule top-to-bottom. First match determines the
-    primary style. Secondary style comes from the pairing table.
-    Fallback is always true_to_life_clean.
+    All matching rules are collected, then the most specific one (most conditions)
+    wins. Among equally specific matches, the one that appears earliest in the YAML
+    is preferred. Fallback is always true_to_life_clean.
     """
     rules = get_routing_rules()
     pairings = get_secondary_pairing()
     primary = FALLBACK_STYLE
     reason = "Default fallback — no specific style matched strongly"
 
-    for rule in rules:
-        if _matches_rule(metadata, rule):
-            primary = rule.get("choose", FALLBACK_STYLE)
-            reason = rule.get("rule", "Matched routing rule")
-            break
+    matching_rules = [
+        (rule, _count_conditions(rule))
+        for rule in rules
+        if _matches_rule(metadata, rule)
+    ]
+
+    if matching_rules:
+        # Pick the most specific match (most conditions); ties break by YAML order (index 0)
+        best_rule, _ = max(matching_rules, key=lambda x: x[1])
+        primary = best_rule.get("choose", FALLBACK_STYLE)
+        reason = best_rule.get("rule", "Matched routing rule")
 
     secondary = pairings.get(primary, FALLBACK_STYLE)
 

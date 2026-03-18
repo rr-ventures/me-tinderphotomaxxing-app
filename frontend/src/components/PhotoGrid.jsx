@@ -14,9 +14,10 @@ function PhotoGrid({ photos, results, onPhotoClick, selectable, selectedIds, onS
   const startIdx = page * PHOTOS_PER_PAGE
   const visiblePhotos = photos.slice(startIdx, startIdx + PHOTOS_PER_PAGE)
 
+  // Key by filename so results match photos regardless of ID changes across environments/restarts
   const resultMap = {}
   if (results) {
-    results.forEach(r => { resultMap[r.image_id] = r })
+    results.forEach(r => { resultMap[r.filename] = r })
   }
 
   return (
@@ -51,8 +52,8 @@ function PhotoGrid({ photos, results, onPhotoClick, selectable, selectedIds, onS
           <PhotoCard
             key={photo.id}
             photo={photo}
-            result={resultMap[photo.id]}
-            onClick={() => onPhotoClick && onPhotoClick(photo, resultMap[photo.id])}
+            result={resultMap[photo.filename]}
+            onClick={() => onPhotoClick && onPhotoClick(photo, resultMap[photo.filename])}
             selectable={selectable}
             selected={selectedIds?.has(photo.id)}
             onSelect={onSelect}
