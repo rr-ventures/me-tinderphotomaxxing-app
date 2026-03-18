@@ -7,6 +7,7 @@ import {
   getCropOptions,
   upscalePreviewUrl,
   blurPreviewUrl,
+  rotatePhotoManual,
 } from '../api/client'
 
 const UPSCALE_STEPS = [
@@ -69,7 +70,10 @@ function getFilterForPreset(presetName) {
 
 function PhotoDetail({ photo, result, runId, onClose, onPrev, onNext }) {
   const [previewSrc, setPreviewSrc] = useState(null)
-  const originalSrc = `/api/photos/${photo.id}/full`
+  const [rotating, setRotating] = useState(false)
+  const [rotationKey, setRotationKey] = useState(0)
+
+  const originalSrc = `/api/photos/${photo.id}/full${rotationKey ? `?v=${rotationKey}` : ''}`
 
   const [recommendations, setRecommendations] = useState([])
   const [dangerZones, setDangerZones] = useState([])
@@ -529,6 +533,69 @@ function PhotoDetail({ photo, result, runId, onClose, onPrev, onNext }) {
               ) : (
                 <p className="muted">No preset recommendations available.</p>
               )}
+            </div>
+
+            {/* ═══ ROTATE ═══ */}
+            <div className="edit-section">
+              <div className="edit-section-header">
+                <h3>Rotate</h3>
+                <div className="edit-section-actions">
+                  <button
+                    className="btn btn-small"
+                    disabled={rotating}
+                    onClick={async () => {
+                      setRotating(true)
+                      try {
+                        await rotatePhotoManual(photo.id, 90)
+                        setRotationKey(k => k + 1)
+                        setPreviewSrc(null)
+                        setStatus({ type: 'info', message: 'Rotated 90° clockwise. Image saved.' })
+                      } catch (e) {
+                        setStatus({ type: 'error', message: `Rotate failed: ${e.message}` })
+                      } finally { setRotating(false) }
+                    }}
+                  >
+                    {rotating ? '...' : '↻ 90° CW'}
+                  </button>
+                  <button
+                    className="btn btn-small"
+                    disabled={rotating}
+                    onClick={async () => {
+                      setRotating(true)
+                      try {
+                        await rotatePhotoManual(photo.id, 270)
+                        setRotationKey(k => k + 1)
+                        setPreviewSrc(null)
+                        setStatus({ type: 'info', message: 'Rotated 90° counter-clockwise. Image saved.' })
+                      } catch (e) {
+                        setStatus({ type: 'error', message: `Rotate failed: ${e.message}` })
+                      } finally { setRotating(false) }
+                    }}
+                  >
+                    {rotating ? '...' : '↺ 90° CCW'}
+                  </button>
+                  <button
+                    className="btn btn-small"
+                    disabled={rotating}
+                    onClick={async () => {
+                      setRotating(true)
+                      try {
+                        await rotatePhotoManual(photo.id, 180)
+                        setRotationKey(k => k + 1)
+                        setPreviewSrc(null)
+                        setStatus({ type: 'info', message: 'Rotated 180°. Image saved.' })
+                      } catch (e) {
+                        setStatus({ type: 'error', message: `Rotate failed: ${e.message}` })
+                      } finally { setRotating(false) }
+                    }}
+                  >
+                    {rotating ? '...' : '↕ 180°'}
+                  </button>
+                </div>
+              </div>
+              <p className="muted" style={{ fontSize: '0.78rem', padding: '4px 0' }}>
+                Rotation is saved directly to the file. Thumbnail updates automatically.
+              </p>
             </div>
 
             {/* ═══ CROP ═══ */}

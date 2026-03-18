@@ -440,6 +440,63 @@ async def get_run(run_id: str):
         return json.load(f)
 
 
+@router.delete("/runs/{run_id}")
+async def delete_run(run_id: str):
+    """Delete a run's JSON file. Does NOT delete the photos themselves."""
+    run_path = config.RUNS_DIR / f"{run_id}.json"
+    if not run_path.exists():
+        raise HTTPException(status_code=404, detail="Run not found")
+    run_path.unlink()
+    return {"deleted": run_id}
+
+
+@router.get("/runs/merged/all")
+async def get_merged_run():
+    """
+    Return a synthetic merged run combining all run JSONs.
+    Deduplicates by filename — keeps the most recent result for each photo.
+    """
+    config.RUNS_DIR.mkdir(parents=True, exist_ok=True)
+    run_files = sorted(
+        config.RUNS_DIR.glob("*.json"),
+        key=lambda p: p.name,
+        reverse=True,
+    )
+
+    seen_filenames: set[str] = set()
+    merged_results: list[dict] = []
+    merged_errors: list[dict] = []
+    total_cost = 0.0
+
+    for rf in run_files:
+        try:
+            with open(rf, encoding="utf-8") as f:
+                data = json.load(f)
+            for r in data.get("results", []):
+                fname = r.get("filename", "")
+                if fname not in seen_filenames:
+                    seen_filenames.add(fname)
+                    merged_results.append(r)
+            for e in data.get("errors", []):
+                fname = e.get("filename", "")
+                if fname not in seen_filenames:
+                    merged_errors.append(e)
+            total_cost += data.get("estimated_cost_usd", 0) or 0
+        except Exception:
+            continue
+
+    return {
+        "run_id": "all",
+        "model": "merged",
+        "total_photos": len(merged_results) + len(merged_errors),
+        "total_analyzed": len(merged_results),
+        "total_errors": len(merged_errors),
+        "estimated_cost_usd": round(total_cost, 6),
+        "results": merged_results,
+        "errors": merged_errors,
+    }
+
+
 @router.get("/runs/{run_id}/download")
 async def download_run_photos(
     run_id: str,

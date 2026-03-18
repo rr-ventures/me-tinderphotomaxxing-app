@@ -1199,6 +1199,274 @@ body {
   margin-left: auto;
 }
 
+/* ── Analyzed banner on Dashboard ────────────────────────────────────────── */
+.analyzed-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  background: linear-gradient(135deg, rgba(79, 143, 247, 0.12), rgba(79, 143, 247, 0.06));
+  border: 1px solid rgba(79, 143, 247, 0.3);
+  border-radius: 12px;
+  padding: 16px 24px;
+  margin-bottom: 24px;
+  gap: 16px;
+}
+
+.analyzed-banner-text {
+  font-size: 1rem;
+  color: var(--text-primary);
+}
+
+.analyzed-banner-text strong {
+  color: var(--accent);
+}
+
+/* ── Run card delete button ───────────────────────────────────────────────── */
+.run-card {
+  position: relative;
+  display: flex;
+  align-items: stretch;
+  gap: 0;
+}
+
+.run-card-clickable {
+  flex: 1;
+  cursor: pointer;
+  padding: 14px 16px;
+}
+
+.run-delete-btn {
+  opacity: 0;
+  transition: opacity 0.15s;
+  border-radius: 0 8px 8px 0;
+  border-left: 1px solid var(--border);
+  padding: 0 14px;
+  font-size: 0.78rem;
+}
+
+.run-card:hover .run-delete-btn {
+  opacity: 1;
+}
+
+/* ── Runs history (collapsed at bottom of Analyze page) ──────────────────── */
+.runs-history {
+  margin-top: 32px;
+  border-top: 1px solid var(--border);
+  padding-top: 16px;
+}
+
+.runs-history-summary {
+  font-size: 0.88rem;
+  color: var(--text-secondary);
+  cursor: pointer;
+  user-select: none;
+  list-style: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.runs-history-summary::-webkit-details-marker { display: none; }
+
+.runs-history-summary::before {
+  content: '▶';
+  font-size: 0.65rem;
+  transition: transform 0.15s;
+}
+
+details.runs-history[open] .runs-history-summary::before {
+  transform: rotate(90deg);
+}
+
+/* ── Nav badges ───────────────────────────────────────────────────────────── */
+.nav-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--accent);
+  color: #fff;
+  font-size: 0.65rem;
+  font-weight: 700;
+  border-radius: 10px;
+  padding: 1px 6px;
+  margin-left: 5px;
+  min-width: 18px;
+}
+
+.nav-badge-saved {
+  background: #f59e0b;
+}
+
+.nav-badge-shortlist {
+  background: #8b5cf6;
+}
+
+/* ── Photos / Saved page ──────────────────────────────────────────────────── */
+.photos-page,
+.saved-page {
+  padding: 24px 32px 120px;
+  max-width: 1400px;
+  margin: 0 auto;
+}
+
+.photos-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 20px;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.photos-header-left {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.photos-header-left h1 {
+  margin: 0;
+  font-size: 1.6rem;
+}
+
+.photos-header-right {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.photos-count-badge {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  padding: 3px 12px;
+  font-size: 0.82rem;
+  color: var(--text-secondary);
+  font-weight: 500;
+}
+
+.run-selector {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text-primary);
+  padding: 6px 10px;
+  font-size: 0.82rem;
+  cursor: pointer;
+  max-width: 280px;
+}
+
+.run-selector:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.filter-bar-spacer {
+  flex: 1;
+}
+
+/* ── Loading / empty states ───────────────────────────────────────────────── */
+.loading-page {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  min-height: 40vh;
+  gap: 16px;
+}
+
+.loading-spinner {
+  width: 36px;
+  height: 36px;
+  border: 3px solid var(--border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+.empty-page {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  min-height: 50vh;
+  gap: 12px;
+  text-align: center;
+}
+
+.empty-page-icon {
+  font-size: 3rem;
+  margin-bottom: 8px;
+}
+
+.empty-page h2 {
+  margin: 0;
+  font-size: 1.4rem;
+}
+
+/* ── Saved badge on photo card ────────────────────────────────────────────── */
+.saved-badge {
+  background: #f59e0b !important;
+  color: #fff;
+}
+
+/* ── Shortlist star button on photo card ──────────────────────────────────── */
+.photo-card-star {
+  position: absolute;
+  top: 6px;
+  left: 6px;
+  background: rgba(0, 0, 0, 0.45);
+  border: none;
+  border-radius: 50%;
+  width: 28px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.9rem;
+  color: rgba(255, 255, 255, 0.5);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.15s, color 0.15s, background 0.15s;
+  z-index: 3;
+  line-height: 1;
+}
+
+.photo-card:hover .photo-card-star {
+  opacity: 1;
+}
+
+.photo-card-star:hover {
+  background: rgba(139, 92, 246, 0.8);
+  color: #fff;
+}
+
+.photo-card-star-active {
+  opacity: 1 !important;
+  color: #f59e0b !important;
+  background: rgba(0, 0, 0, 0.55) !important;
+}
+
+.photo-card-star-active:hover {
+  background: rgba(239, 68, 68, 0.7) !important;
+  color: #fff !important;
+}
+
+.photo-card-shortlisted {
+  outline: 2px solid #8b5cf6;
+  outline-offset: -2px;
+}
+
+.shortlist-page {
+  padding: 24px 32px 120px;
+  max-width: 1400px;
+  margin: 0 auto;
+}
+
 /* ── Filter Bar ───────────────────────────────────────────────────────────── */
 .filter-bar {
   display: flex;

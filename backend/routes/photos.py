@@ -102,28 +102,47 @@ MEDIA_TYPES = {
 
 
 @router.get("/photos")
-async def list_photos():
+async def list_photos(run_id: Optional[str] = None):
+    """
+    List photos.
+    - If run_id is provided: fast path — reads filenames from the run JSON,
+      finds each file on disk (analyzed/ or archived/), returns entries.
+      Only generates thumbnails that don't already exist.
+    - If no run_id: scans to_process/ + analyzed/ (legacy, slow for large sets).
+    """
     import asyncio
     import concurrent.futures
+    import json as _json
 
-    config.INPUT_DIR.mkdir(parents=True, exist_ok=True)
-    config.ANALYZED_DIR.mkdir(parents=True, exist_ok=True)
-    paths = scan_image_paths(include_analyzed=True)
-
-    def _build_photo_entry(path: Path) -> dict:
+    def _build_entry(path: Path) -> dict:
+        import json as _json
         photo_id = _photo_id(path)
-        info = get_image_info(path)
         thumb_path = config.THUMBNAILS_DIR / f"{photo_id}.jpg"
-        if thumb_path.exists():
-            thumbnail_url = f"/thumbnails/{photo_id}.jpg"
+        info_cache_path = config.THUMBNAILS_DIR / f"{photo_id}.json"
+
+        # Use cached info if available — avoids opening the original image every time
+        if info_cache_path.exists():
+            try:
+                with open(info_cache_path) as f:
+                    info = _json.load(f)
+            except Exception:
+                info = {}
         else:
+            info = get_image_info(path)
+            # Cache it for next time
+            try:
+                with open(info_cache_path, "w") as f:
+                    _json.dump(info, f)
+            except Exception:
+                pass
+
+        if not thumb_path.exists():
             try:
                 get_or_create_thumbnail(path)
-                thumbnail_url = f"/thumbnails/{photo_id}.jpg"
             except Exception:
-                thumbnail_url = None
+                pass
+        thumbnail_url = f"/thumbnails/{photo_id}.jpg" if thumb_path.exists() else None
 
-        # Determine which pipeline folder this photo is in
         parent = path.parent.resolve()
         if parent == config.INPUT_DIR.resolve():
             folder = "to_process"
@@ -152,10 +171,31 @@ async def list_photos():
             "short_side": info.get("short_side", 0),
         }
 
+    if run_id:
+        # Fast path: resolve paths from run JSON, search analyzed/ + archived/ only
+        run_path = config.RUNS_DIR / f"{run_id}.json"
+        if not run_path.exists():
+            return {"photos": [], "total": 0}
+        with open(run_path) as f:
+            run_data = _json.load(f)
+        filenames = {r["filename"] for r in run_data.get("results", [])}
+        search_dirs = [config.ANALYZED_DIR, config.ARCHIVED_DIR, config.INPUT_DIR, config.ERRORED_DIR]
+        paths = []
+        for fname in filenames:
+            for d in search_dirs:
+                candidate = d / fname
+                if candidate.exists():
+                    paths.append(candidate)
+                    break
+    else:
+        config.INPUT_DIR.mkdir(parents=True, exist_ok=True)
+        config.ANALYZED_DIR.mkdir(parents=True, exist_ok=True)
+        paths = scan_image_paths(include_analyzed=True)
+
     loop = asyncio.get_event_loop()
     with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
         photos = list(await asyncio.gather(
-            *[loop.run_in_executor(pool, _build_photo_entry, p) for p in paths]
+            *[loop.run_in_executor(pool, _build_entry, p) for p in paths]
         ))
 
     return {"photos": photos, "total": len(photos)}
@@ -230,6 +270,43 @@ async def upload_photos(files: list[UploadFile] = File(...)):
         "files": saved,
         "skipped_files": skipped,
     }
+
+
+@router.post("/photos/{photo_id}/rotate-manual")
+async def rotate_photo_manual(photo_id: str, degrees: int = 90):
+    """
+    Rotate a photo by the given degrees (90, 180, 270) and save it back in place.
+    This is a destructive in-place edit — the original is overwritten.
+    Used when EXIF rotation is absent but the photo is visually sideways.
+    """
+    path = _find_photo(photo_id)
+    if not path or not path.exists():
+        raise HTTPException(status_code=404, detail="Photo not found")
+    if degrees not in (90, 180, 270, -90):
+        raise HTTPException(status_code=400, detail="degrees must be 90, 180, or 270")
+
+    try:
+        img = Image.open(path)
+        img = fix_orientation(img)
+        img = img.convert("RGB")
+        # PIL rotate is counter-clockwise; expand=True keeps full image
+        img = img.rotate(-degrees, expand=True)
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=95)
+        img.close()
+        # Write back in place
+        with open(path, "wb") as f:
+            f.write(buf.getvalue())
+        # Invalidate thumbnail and info cache
+        thumb_path = config.THUMBNAILS_DIR / f"{_photo_id(path)}.jpg"
+        info_cache = config.THUMBNAILS_DIR / f"{_photo_id(path)}.json"
+        if thumb_path.exists():
+            thumb_path.unlink()
+        if info_cache.exists():
+            info_cache.unlink()
+        return {"status": "rotated", "degrees": degrees, "filename": path.name}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.post("/photos/{photo_id}/rotate")
@@ -1271,3 +1348,113 @@ async def batch_enhance(req: BatchEnhanceRequest):
         "total_processed": len(results),
         "total_errors": len(errors),
     }
+
+
+# ── Saved / Shortlist ────────────────────────────────────────────────────────
+
+def _load_saved() -> dict:
+    """Load saved.json — {photo_ids: [...], run_id: str}"""
+    import json as _json
+    if config.SAVED_FILE.exists():
+        try:
+            with open(config.SAVED_FILE) as f:
+                return _json.load(f)
+        except Exception:
+            pass
+    return {"photo_ids": [], "run_id": None}
+
+
+def _write_saved(data: dict):
+    import json as _json
+    config.DATA_DIR.mkdir(parents=True, exist_ok=True)
+    with open(config.SAVED_FILE, "w") as f:
+        _json.dump(data, f)
+
+
+class SavedUpdateRequest(BaseModel):
+    photo_ids: list[str]
+    run_id: str | None = None
+
+
+@router.get("/photos/saved")
+async def get_saved():
+    """Return the current saved/shortlist photo IDs and their run context."""
+    return _load_saved()
+
+
+@router.post("/photos/saved/add")
+async def add_to_saved(req: SavedUpdateRequest):
+    """Add photo IDs to the saved list."""
+    data = _load_saved()
+    existing = set(data.get("photo_ids", []))
+    existing.update(req.photo_ids)
+    data["photo_ids"] = list(existing)
+    if req.run_id:
+        data["run_id"] = req.run_id
+    _write_saved(data)
+    return {"saved": len(data["photo_ids"])}
+
+
+@router.post("/photos/saved/remove")
+async def remove_from_saved(req: SavedUpdateRequest):
+    """Remove photo IDs from the saved list."""
+    data = _load_saved()
+    existing = set(data.get("photo_ids", []))
+    existing.difference_update(req.photo_ids)
+    data["photo_ids"] = list(existing)
+    _write_saved(data)
+    return {"saved": len(data["photo_ids"])}
+
+
+@router.delete("/photos/saved")
+async def clear_saved():
+    """Clear the entire saved list."""
+    _write_saved({"photo_ids": [], "run_id": None})
+    return {"saved": 0}
+
+
+# ── Shortlist ────────────────────────────────────────────────────────────────
+
+def _load_shortlist() -> dict:
+    import json as _json
+    if config.SHORTLIST_FILE.exists():
+        try:
+            with open(config.SHORTLIST_FILE) as f:
+                return _json.load(f)
+        except Exception:
+            pass
+    return {"photo_ids": [], "run_id": None}
+
+
+def _write_shortlist(data: dict):
+    import json as _json
+    config.DATA_DIR.mkdir(parents=True, exist_ok=True)
+    with open(config.SHORTLIST_FILE, "w") as f:
+        _json.dump(data, f)
+
+
+@router.get("/photos/shortlist")
+async def get_shortlist():
+    return _load_shortlist()
+
+
+@router.post("/photos/shortlist/add")
+async def add_to_shortlist(req: SavedUpdateRequest):
+    data = _load_shortlist()
+    existing = set(data.get("photo_ids", []))
+    existing.update(req.photo_ids)
+    data["photo_ids"] = list(existing)
+    if req.run_id:
+        data["run_id"] = req.run_id
+    _write_shortlist(data)
+    return {"shortlisted": len(data["photo_ids"])}
+
+
+@router.post("/photos/shortlist/remove")
+async def remove_from_shortlist(req: SavedUpdateRequest):
+    data = _load_shortlist()
+    existing = set(data.get("photo_ids", []))
+    existing.difference_update(req.photo_ids)
+    data["photo_ids"] = list(existing)
+    _write_shortlist(data)
+    return {"shortlisted": len(data["photo_ids"])}

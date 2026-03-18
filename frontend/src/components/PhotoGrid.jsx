@@ -3,7 +3,7 @@ import PhotoCard from './PhotoCard'
 
 const PHOTOS_PER_PAGE = 48
 
-function PhotoGrid({ photos, results, onPhotoClick, selectable, selectedIds, onSelect }) {
+function PhotoGrid({ photos, results, onPhotoClick, selectable, selectedIds, onSelect, savedIds, shortlistIds, onShortlist }) {
   const [page, setPage] = useState(0)
 
   if (!photos || photos.length === 0) {
@@ -57,6 +57,9 @@ function PhotoGrid({ photos, results, onPhotoClick, selectable, selectedIds, onS
             selectable={selectable}
             selected={selectedIds?.has(photo.id)}
             onSelect={onSelect}
+            isSaved={savedIds?.has(photo.id)}
+            isShortlisted={shortlistIds?.has(photo.id)}
+            onShortlist={onShortlist}
           />
         ))}
       </div>

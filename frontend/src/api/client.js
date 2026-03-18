@@ -86,8 +86,9 @@ export async function uploadPhotos(files, onProgress) {
   })
 }
 
-export async function listPhotos() {
-  return get('/photos')
+export async function listPhotos(runId = null) {
+  const params = runId ? `?run_id=${encodeURIComponent(runId)}` : ''
+  return get(`/photos${params}`)
 }
 
 export async function getPhotoCount() {
@@ -246,7 +247,25 @@ export async function listRuns() {
 }
 
 export async function getRun(runId) {
+  if (runId === 'all') return get('/runs/merged/all')
   return get(`/runs/${runId}`)
+}
+
+export async function deleteRun(runId) {
+  const response = await fetch(`${API_BASE}/runs/${runId}`, { method: 'DELETE' })
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ detail: response.statusText }))
+    throw new Error(error.detail || `Delete failed: ${response.status}`)
+  }
+  return response.json()
+}
+
+export async function getMergedRun() {
+  return get('/runs/merged/all')
+}
+
+export async function rotatePhotoManual(photoId, degrees = 90) {
+  return post(`/photos/${photoId}/rotate-manual?degrees=${degrees}`)
 }
 
 export async function downloadRunPhotos(runId, photoIds = null, folder = 'analyzed') {
@@ -270,6 +289,30 @@ export async function downloadRunPhotos(runId, photoIds = null, folder = 'analyz
 
 export async function getFolderCounts() {
   return get('/photos/folder-counts')
+}
+
+export async function getSaved() {
+  return get('/photos/saved')
+}
+
+export async function addToSaved(photoIds, runId = null) {
+  return postJson('/photos/saved/add', { photo_ids: photoIds, run_id: runId })
+}
+
+export async function removeFromSaved(photoIds) {
+  return postJson('/photos/saved/remove', { photo_ids: photoIds })
+}
+
+export async function getShortlist() {
+  return get('/photos/shortlist')
+}
+
+export async function addToShortlist(photoIds, runId = null) {
+  return postJson('/photos/shortlist/add', { photo_ids: photoIds, run_id: runId })
+}
+
+export async function removeFromShortlist(photoIds) {
+  return postJson('/photos/shortlist/remove', { photo_ids: photoIds })
 }
 
 // ── Model endpoints ─────────────────────────────────────────────────────

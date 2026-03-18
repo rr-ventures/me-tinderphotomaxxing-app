@@ -44,7 +44,7 @@ function Analysis() {
       try {
         const [runData, photoData] = await Promise.all([
           getRun(runId),
-          listPhotos(),
+          listPhotos(runId),
         ])
         setRun(runData)
         setPhotos(photoData.photos || [])
@@ -63,7 +63,7 @@ function Analysis() {
     try {
       const updated = await retryFailed(runId)
       setRun(updated)
-      const photoData = await listPhotos()
+      const photoData = await listPhotos(runId)
       setPhotos(photoData.photos || [])
       const stillFailed = updated.errors?.length || 0
       const newlyFixed = (run?.errors?.length || 0) - stillFailed

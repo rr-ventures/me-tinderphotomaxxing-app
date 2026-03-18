@@ -1,5 +1,4 @@
-function PhotoCard({ photo, result, onClick, selectable, selected, onSelect }) {
-  const hasIssues = photo.needs_rotation || photo.needs_upscale
+function PhotoCard({ photo, result, onClick, selectable, selected, onSelect, isSaved, isShortlisted, onShortlist }) {
   const presetName = result?.preset_recommendation?.preset?.name
   const quality = result?.metadata?.photo_quality
   const qualityColor = quality >= 8 ? '#22c55e' : quality >= 6 ? '#f59e0b' : quality ? '#ef4444' : null
@@ -9,9 +8,14 @@ function PhotoCard({ photo, result, onClick, selectable, selected, onSelect }) {
     onSelect?.(photo.id)
   }
 
+  function handleShortlistClick(e) {
+    e.stopPropagation()
+    onShortlist?.(photo.id)
+  }
+
   return (
     <div
-      className={`photo-card ${selected ? 'photo-card-selected' : ''}`}
+      className={`photo-card ${selected ? 'photo-card-selected' : ''} ${isShortlisted ? 'photo-card-shortlisted' : ''}`}
       onClick={onClick}
     >
       <div className="photo-card-image">
@@ -35,11 +39,25 @@ function PhotoCard({ photo, result, onClick, selectable, selected, onSelect }) {
           </div>
         )}
 
+        {/* Shortlist star — always visible, top-left */}
+        {onShortlist && (
+          <button
+            className={`photo-card-star ${isShortlisted ? 'photo-card-star-active' : ''}`}
+            onClick={handleShortlistClick}
+            title={isShortlisted ? 'Remove from shortlist' : 'Add to shortlist'}
+          >
+            ★
+          </button>
+        )}
+
         <div className="photo-card-overlay">
           {presetName && (
             <span className="card-preset-tag">{presetName}</span>
           )}
           <div className="photo-card-badges">
+            {isSaved && (
+              <span className="issue-badge saved-badge" title="Saved">✓</span>
+            )}
             {quality != null && (
               <span
                 className="issue-badge quality-badge"
