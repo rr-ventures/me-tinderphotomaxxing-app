@@ -14,9 +14,10 @@ def scan_image_paths(
     input_dir: Path | None = None,
     include_analyzed: bool = False,
     include_errored: bool = False,
+    include_archived: bool = False,
 ) -> list[Path]:
     """
-    Find all supported image files in the input directory (and optionally analyzed/errored).
+    Find all supported image files in the input directory (and optionally analyzed/errored/archived).
 
     By default only scans to_process/. Pass include_analyzed=True or include_errored=True
     to also include those folders (used when looking up photos by ID for serving/editing).
@@ -32,6 +33,8 @@ def scan_image_paths(
             folders.append(config.ANALYZED_DIR)
         if include_errored:
             folders.append(config.ERRORED_DIR)
+        if include_archived:
+            folders.append(config.ARCHIVED_DIR)
 
     exts = {e.lower() for e in config.SUPPORTED_EXTENSIONS}
     all_paths: list[Path] = []
@@ -55,8 +58,8 @@ def scan_image_paths(
 
 
 def scan_all_image_paths() -> list[Path]:
-    """Scan to_process/, analyzed/, and errored/ — used for photo lookup by ID."""
-    return scan_image_paths(include_analyzed=True, include_errored=True)
+    """Scan to_process/, analyzed/, errored/, and archived/ — used for photo lookup by ID."""
+    return scan_image_paths(include_analyzed=True, include_errored=True, include_archived=True)
 
 
 def count_photos_by_folder() -> dict:
@@ -76,6 +79,7 @@ def count_photos_by_folder() -> dict:
         "to_process": _count(config.INPUT_DIR),
         "analyzed": _count(config.ANALYZED_DIR),
         "errored": _count(config.ERRORED_DIR),
+        "archived": _count(config.ARCHIVED_DIR),
     }
 
     # Surface the most recent run's summary so the frontend can show it

@@ -1,100 +1,115 @@
-# Dating Profile Photo Analyzer
+# Photo Analyser
 
-Analyze your dating profile photos with AI. Get style recommendations,
-Lightroom preset suggestions, and crop recommendations — all in a clean
-React UI backed by a FastAPI backend and Google Gemini.
+AI-powered photo analysis that tells you which Lightroom presets and edits will work best for each of your photos. Upload a batch, let Gemini analyse them, then preview, crop, enhance and download the results.
 
-## How it works
+---
 
-1. Drop your photos into `data/to_process/`
-2. The app scans them and shows a grid preview
-3. You pick a Gemini model (cheap/fast or expensive/accurate)
-4. Gemini analyzes each photo and extracts metadata (scene, lighting, quality, etc.)
-5. The selector matches metadata against the YAML style library
-6. You get the top 2 style recommendations with Lightroom presets and crop guidance
+## What it does
 
-## Quick start
+You drop in your photos, the app runs them through Google's Gemini AI, and for each photo you get:
 
-```bash
-# 1. Install backend dependencies
-pip install -r backend/requirements.txt
+- A recommended Lightroom preset with a live CSS preview
+- A style recommendation (e.g. Warm Golden, Moody Cinematic, Bright & Airy)
+- Crop suggestions based on the photo's content
+- AI upscale / enhancement options
+- One-click bulk download as a ZIP
 
-# 2. Install frontend dependencies
-cd frontend && npm install && cd ..
+---
 
-# 3. Add your Gemini API key
-echo "GEMINI_API_KEY=your_key_here" > .env
+## Getting started
 
-# 4. Start the backend (in one terminal)
-uvicorn backend.main:app --reload --port 8000
+You'll need a **Gemini API key** from [Google AI Studio](https://aistudio.google.com).
 
-# 5. Start the frontend (in another terminal)
-cd frontend && npm run dev
+1. Add your key — create a file called `.env` in the project root:
+   ```
+   GEMINI_API_KEY=your_key_here
+   ```
 
-# 6. Open http://localhost:5173 in your browser
+2. Start the app:
+   ```bash
+   # Backend
+   uvicorn backend.main:app --reload --port 8000 --reload-exclude "frontend/*" --reload-exclude "data/*"
+
+   # Frontend (in a second terminal)
+   cd frontend && npm run dev
+   ```
+
+3. Open [http://localhost:3000](http://localhost:3000)
+
+---
+
+## How to use it
+
+### Step 1 — Upload your photos
+Drag and drop photos onto the Dashboard, or drop them directly into the `data/to_process/` folder. Supports JPG, PNG, WebP, HEIC, TIFF, BMP.
+
+### Step 2 — Run analysis
+Choose a model and click **Analyse Photos**. A progress bar shows each photo as it's processed. When done, you're taken straight to the results.
+
+- Photos that succeed move to `data/analyzed/`
+- Photos that fail (e.g. rate limit errors) move to `data/errored/` and can be retried
+
+### Step 3 — Review results
+The Analysis page shows all your photos with their recommendations. Click any photo to open the detail view where you can:
+
+- **Preview presets** — see a live CSS approximation of each Lightroom preset
+- **Crop** — apply the AI-recommended crop or adjust it manually
+- **Clarity** — AI upscale focused on sharpness and resolution only
+- **Full Enhance** — full AI portrait enhancement (sharpens, lifts shadows, removes noise, preserves identity)
+- **Background Blur** — AI bokeh/portrait-mode background blur
+
+### Step 4 — Export
+When you're happy with your photos:
+
+- **Download All** — downloads every photo from the run as a ZIP
+- **Select photos + Download** — select specific photos and download just those
+- **Bulk Save / Bulk Enhance** — process multiple photos at once to `data/processed/`
+
+---
+
+## The 6 photo styles
+
+| Style | Best for |
+|---|---|
+| **True to Life** | Any photo — safe, natural, authentic |
+| **Warm Golden** | Golden hour, sunset, outdoor warmth |
+| **Bright & Airy** | Flat daylight, indoor, light backgrounds |
+| **Moody Cinematic** | Urban scenes, dramatic lighting, contrast |
+| **Nightlife** | Bars, clubs, low light, night shots |
+| **Black & White** | Photos with bad or distracting colours |
+
+---
+
+## The pipeline
+
+```
+data/to_process/   →   data/analyzed/   →   data/processed/
+  (your photos)       (AI done, ready        (exported/saved)
+                        to review)
+
+                   →   data/errored/
+                       (failed, can retry)
 ```
 
-## Project structure
+The Dashboard shows live counts for each stage so you always know where things are.
 
-```
-├── backend/              Python backend (FastAPI)
-│   ├── main.py           Server entry point
-│   ├── config.py         Configuration
-│   ├── gemini/           Gemini AI client, prompts, parser
-│   ├── analysis/         Style selector, YAML loader, metadata models
-│   ├── images/           Image scanning, thumbnails, processing
-│   ├── routes/           API endpoints
-│   └── tests/            Test suite
-│
-├── frontend/             React frontend (Vite)
-│   ├── src/
-│   │   ├── pages/        Dashboard, Analysis, Settings
-│   │   ├── components/   PhotoGrid, PhotoCard, StyleBadge, etc.
-│   │   ├── api/          Backend API client
-│   │   └── styles/       CSS
-│   └── REACT_GUIDE.md    React explained for Python developers
-│
-├── library/              YAML style/recommendation artifacts
-├── prompts/              Research, audit, and runtime prompt assets
-│
-├── legacy/               Old Streamlit app (archived)
-├── data/                 Runtime data (gitignored)
-└── run_tests.sh          Run all tests
-```
+---
 
-## Running tests
+## Tips
 
-```bash
-./run_tests.sh
-```
+- **Batch size** — you can set a limit (e.g. analyse 50 at a time) to control API costs
+- **Retry failed** — if some photos hit rate limits, use the "Retry Failed" button on the Analysis page
+- **Past runs** — all previous runs are saved and accessible from the Dashboard
+- **Photos are never uploaded to git** — all photo data stays local only
 
-Tests verify the style selector picks the right style for each photo type
-and the Gemini response parser handles valid/invalid responses correctly.
+---
 
-## API docs
+## API key & costs
 
-With the backend running, visit `http://localhost:8000/docs` for interactive
-API documentation (auto-generated by FastAPI).
+The app uses Google Gemini for analysis. Costs depend on the model chosen:
 
-## The 6 styles
+- **Gemini 3.1 Pro** — most accurate, higher cost (~$0.002–0.004 per photo)
 
-| Style | When it's used | Vibe |
-|-------|---------------|------|
-| True to Life | Default safe choice | Natural, authentic |
-| Warm Golden | Golden hour / sunset | Sun-kissed, inviting |
-| Bright & Airy | Flat daylight photos | Light, fresh |
-| Moody Cinematic | Urban backgrounds | Cinematic, contrast |
-| Nightlife | Bars, clubs, night | Punchy, color-corrected |
-| Black & White | Bad/weird colors | Classic B&W rescue |
+A cost estimate is shown on the Dashboard before you start a run.
 
-## Prompt assets
-
-- Authoring and research prompts live in `prompts/`
-- The backend runtime Gemini metadata prompt lives in `prompts/metadata_prompt.py`
-
-## Tech stack
-
-- **Backend:** Python 3.11, FastAPI, Google Gemini AI
-- **Frontend:** React 19, Vite 7, React Router
-- **Testing:** pytest
-- **Data:** YAML style library, JSON run results
+Get a key at [aistudio.google.com](https://aistudio.google.com) — there's a free tier.

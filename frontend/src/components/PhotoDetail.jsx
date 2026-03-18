@@ -67,7 +67,7 @@ function getFilterForPreset(presetName) {
   return 'brightness(1.05) contrast(1.05) saturate(1.08)'
 }
 
-function PhotoDetail({ photo, result, runId, onClose }) {
+function PhotoDetail({ photo, result, runId, onClose, onPrev, onNext }) {
   const [previewSrc, setPreviewSrc] = useState(null)
   const originalSrc = `/api/photos/${photo.id}/full`
 
@@ -91,12 +91,23 @@ function PhotoDetail({ photo, result, runId, onClose }) {
   const [upscaleStep, setUpscaleStep] = useState('')
   const stepTimers = useRef([])
 
-  // Clean up step timers when the modal unmounts (prevents state updates on unmounted component)
+  // Clean up step timers when the modal unmounts
   useEffect(() => {
     return () => {
       stepTimers.current.forEach(t => clearTimeout(t))
     }
   }, [])
+
+  // Keyboard navigation: Escape closes, arrows navigate prev/next
+  useEffect(() => {
+    function handleKey(e) {
+      if (e.key === 'Escape') onClose()
+      if (e.key === 'ArrowLeft' && onPrev) onPrev()
+      if (e.key === 'ArrowRight' && onNext) onNext()
+    }
+    window.addEventListener('keydown', handleKey)
+    return () => window.removeEventListener('keydown', handleKey)
+  }, [onClose, onPrev, onNext])
 
   // Compare mode: 'original' | 'clarity' | 'enhance'
   const [viewMode, setViewMode] = useState('enhance')
@@ -296,11 +307,15 @@ function PhotoDetail({ photo, result, runId, onClose }) {
     return (
       <div className="photo-detail-overlay" onClick={onClose}>
         <div className="photo-detail" onClick={e => e.stopPropagation()}>
-          <div className="detail-header">
-            <h2>{photo.filename}</h2>
-            <button className="close-btn" onClick={onClose}>Close</button>
+        <div className="detail-header">
+          <div className="detail-nav">
+            {onPrev && <button className="detail-nav-btn" onClick={onPrev} title="Previous photo (←)">←</button>}
+            {onNext && <button className="detail-nav-btn" onClick={onNext} title="Next photo (→)">→</button>}
           </div>
-          <p className="muted">No analysis results yet. Run analysis from the Dashboard.</p>
+          <h2>{photo.filename}</h2>
+          <button className="close-btn" onClick={onClose}>✕</button>
+        </div>
+        <p className="muted">No analysis results yet. Run analysis from the Dashboard.</p>
           <img src={originalSrc} alt={photo.filename} style={{ width: '100%', borderRadius: 8, marginTop: 16 }} />
         </div>
       </div>
@@ -311,8 +326,12 @@ function PhotoDetail({ photo, result, runId, onClose }) {
     <div className="photo-detail-overlay" onClick={onClose}>
       <div className="photo-detail photo-detail-wide" onClick={e => e.stopPropagation()}>
         <div className="detail-header">
-          <h2>{photo.filename}</h2>
-          <button className="close-btn" onClick={onClose}>Close</button>
+          <div className="detail-nav">
+            {onPrev && <button className="detail-nav-btn" onClick={onPrev} title="Previous photo (←)">←</button>}
+            {onNext && <button className="detail-nav-btn" onClick={onNext} title="Next photo (→)">→</button>}
+          </div>
+          <h2 className="detail-title">{photo.filename}</h2>
+          <button className="close-btn" onClick={onClose}>✕</button>
         </div>
 
         <div className="detail-body">
@@ -647,7 +666,7 @@ function PhotoDetail({ photo, result, runId, onClose }) {
 
               {/* Show full prompt + details after applying */}
               {upscaleApplied && !upscaleLoading && (
-                <details className="upscale-details" open>
+                <details className="upscale-details">
                   <summary>What was applied</summary>
                   <div className="upscale-technical">
                     <span>Model: <code>Gemini Flash Image</code></span>
@@ -722,10 +741,10 @@ function PhotoDetail({ photo, result, runId, onClose }) {
                 disabled={saving}
               >
                 {saving
-                  ? 'Processing...'
+                  ? 'Saving...'
                   : hasEdits
-                    ? 'Save to Processed'
-                    : 'Save Original to Processed'
+                    ? 'Save Photo'
+                    : 'Save Original'
                 }
               </button>
             </div>

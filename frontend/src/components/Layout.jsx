@@ -29,22 +29,21 @@ function Layout() {
       {/* Navigation bar at the top */}
       <nav className="nav-bar">
         <div className="nav-brand">
-          <span className="nav-logo">Preset Selector</span>
+          <Link to="/" style={{ textDecoration: 'none', color: 'inherit' }}>
+            <span className="nav-logo">Photo Analyser</span>
+          </Link>
         </div>
 
         <div className="nav-links">
           <Link
             to="/"
-            className={`nav-link ${isActive('/') ? 'active' : ''}`}
+            className={`nav-link ${isActive('/') && !location.pathname.startsWith('/analysis') ? 'active' : ''}`}
           >
             Dashboard
           </Link>
-          <Link
-            to="/settings"
-            className={`nav-link ${isActive('/settings') ? 'active' : ''}`}
-          >
-            Settings
-          </Link>
+          {location.pathname.startsWith('/analysis') && (
+            <span className="nav-link active">Results</span>
+          )}
         </div>
       </nav>
 

@@ -1,8 +1,15 @@
 import { useState, useEffect, useMemo } from 'react'
 import { useParams, Link } from 'react-router-dom'
-import { getRun, listPhotos, batchEnhance, batchRename, retryFailed, downloadRunPhotos } from '../api/client'
+import { getRun, listPhotos, batchEnhance, batchRename, retryFailed, downloadRunPhotos, archivePhotos } from '../api/client'
 import PhotoGrid from '../components/PhotoGrid'
 import PhotoDetail from '../components/PhotoDetail'
+
+const QUALITY_OPTIONS = [
+  { value: '', label: 'All quality' },
+  { value: '8', label: '8–10 (High)' },
+  { value: '6', label: '6–7 (Medium)' },
+  { value: '0', label: '1–5 (Low)' },
+]
 
 function Analysis() {
   const { runId } = useParams()
@@ -26,6 +33,10 @@ function Analysis() {
 
   const [downloading, setDownloading] = useState(false)
   const [downloadError, setDownloadError] = useState(null)
+
+  const [filterStyle, setFilterStyle] = useState('')
+  const [filterQuality, setFilterQuality] = useState('')
+  const [filterPreset, setFilterPreset] = useState('')
 
   useEffect(() => {
     async function load() {
@@ -75,7 +86,7 @@ function Analysis() {
   const results = run?.results || []
   const runErrors = run?.errors || []
 
-  // Match run results to on-disk photos by FILENAME (IDs can differ across environments/restarts)
+  // Match run results to on-disk photos by FILENAME — include analyzed + archived
   const analyzedPhotos = useMemo(() => {
     const filenames = new Set(results.map(r => r.filename))
     return photos.filter(p => filenames.has(p.filename))
@@ -88,12 +99,50 @@ function Analysis() {
     return map
   }, [results])
 
+  // Unique styles and presets for filter dropdowns
+  const uniqueStyles = useMemo(() => {
+    const s = new Set(results.map(r => r.primary_style).filter(Boolean))
+    return [...s].sort()
+  }, [results])
+
+  const uniquePresets = useMemo(() => {
+    const s = new Set(results.map(r => r.preset_recommendation?.preset?.name).filter(Boolean))
+    return [...s].sort()
+  }, [results])
+
+  // Apply filters
+  const filteredPhotos = useMemo(() => {
+    let base = analyzedPhotos
+    if (filterStyle) {
+      const styleFilenames = new Set(results.filter(r => r.primary_style === filterStyle).map(r => r.filename))
+      base = base.filter(p => styleFilenames.has(p.filename))
+    }
+    if (filterPreset) {
+      const presetFilenames = new Set(results.filter(r => r.preset_recommendation?.preset?.name === filterPreset).map(r => r.filename))
+      base = base.filter(p => presetFilenames.has(p.filename))
+    }
+    if (filterQuality) {
+      const q = parseInt(filterQuality)
+      base = base.filter(p => {
+        const score = resultByFilename[p.filename]?.metadata?.photo_quality
+        if (score == null) return false
+        if (q === 8) return score >= 8
+        if (q === 6) return score >= 6 && score < 8
+        if (q === 0) return score < 6
+        return true
+      })
+    }
+    return base
+  }, [analyzedPhotos, filterStyle, filterPreset, filterQuality, results, resultByFilename])
+
   const shortlistPhotos = useMemo(
-    () => analyzedPhotos.filter(p => shortlistIds.has(p.id)),
-    [analyzedPhotos, shortlistIds]
+    () => filteredPhotos.filter(p => shortlistIds.has(p.id)),
+    [filteredPhotos, shortlistIds]
   )
 
-  const displayPhotos = activeTab === 'shortlist' ? shortlistPhotos : analyzedPhotos
+  const displayPhotos = activeTab === 'shortlist' ? shortlistPhotos : filteredPhotos
+
+  const hasActiveFilters = !!(filterStyle || filterPreset || filterQuality)
 
   const presetCounts = useMemo(() => {
     const counts = {}
@@ -106,8 +155,17 @@ function Analysis() {
 
   function handlePhotoClick(photo, result) {
     setSelectedPhoto(photo)
-    // Prefer the passed result; fall back to filename lookup (handles ID mismatch across environments)
     setSelectedResult(result || resultByFilename[photo.filename] || null)
+  }
+
+  function handlePhotoNav(direction) {
+    if (!selectedPhoto) return
+    const idx = displayPhotos.findIndex(p => p.id === selectedPhoto.id)
+    const nextIdx = idx + direction
+    if (nextIdx < 0 || nextIdx >= displayPhotos.length) return
+    const next = displayPhotos[nextIdx]
+    setSelectedPhoto(next)
+    setSelectedResult(resultByFilename[next.filename] || null)
   }
 
   function toggleSelection(photoId) {
@@ -144,6 +202,27 @@ function Analysis() {
       return next
     })
     setSelectedIds(new Set())
+  }
+
+  async function handleArchive(ids) {
+    if (!ids || ids.length === 0) return
+    setBulkRunning(true)
+    setBulkStatus(null)
+    try {
+      const res = await archivePhotos(ids)
+      setBulkStatus({
+        type: 'success',
+        message: `${res.archived} photo${res.archived !== 1 ? 's' : ''} archived.${res.errors > 0 ? ` ${res.errors} failed.` : ''}`,
+      })
+      setSelectedIds(new Set())
+      // Reload photos so archived ones disappear from the grid
+      const photoData = await listPhotos()
+      setPhotos(photoData.photos || [])
+    } catch (err) {
+      setBulkStatus({ type: 'error', message: `Archive failed: ${err.message}` })
+    } finally {
+      setBulkRunning(false)
+    }
   }
 
   async function handleDownload(ids = null) {
@@ -232,9 +311,9 @@ function Analysis() {
     <div className="analysis-page">
       <div className="page-header">
         <div>
-          <h1>Preset Recommendations</h1>
+          <h1>Analysis Results</h1>
           <p className="page-subtitle">
-            Run: {run.run_id} &middot; Model: {run.model} &middot; {results.length} photos analyzed
+            {run.run_id} &middot; {results.length} photos &middot; {run.model}
           </p>
         </div>
         <div className="page-header-actions">
@@ -246,7 +325,7 @@ function Analysis() {
           >
             {downloading ? 'Preparing ZIP...' : `Download All (${results.length})`}
           </button>
-          <Link to="/" className="btn btn-secondary">Back to Dashboard</Link>
+          <Link to="/" className="btn btn-secondary">← Dashboard</Link>
         </div>
       </div>
       {downloadError && (
@@ -259,11 +338,11 @@ function Analysis() {
       <div className="stats-row">
         <div className="stat-card">
           <div className="stat-value">{run.total_analyzed}</div>
-          <div className="stat-label">Analyzed</div>
+          <div className="stat-label">Photos</div>
         </div>
         <div className="stat-card">
           <div className="stat-value">{Object.keys(presetCounts).length}</div>
-          <div className="stat-label">Unique Presets</div>
+          <div className="stat-label">Presets Used</div>
         </div>
         <div className="stat-card">
           <div className="stat-value">${run.estimated_cost_usd?.toFixed(4)}</div>
@@ -276,13 +355,19 @@ function Analysis() {
       </div>
 
       {Object.keys(presetCounts).length > 0 && (
-        <details className="section">
-          <summary><h2 style={{ display: 'inline' }}>Preset Distribution</h2></summary>
+        <details className="section" open>
+          <summary><h2 style={{ display: 'inline' }}>Preset Breakdown</h2></summary>
           <div className="preset-distribution" style={{ marginTop: 10 }}>
             {Object.entries(presetCounts)
               .sort(([, a], [, b]) => b - a)
               .map(([preset, count]) => (
-                <div key={preset} className="preset-dist-item">
+                <div
+                  key={preset}
+                  className={`preset-dist-item ${filterPreset === preset ? 'preset-dist-item-active' : ''}`}
+                  onClick={() => setFilterPreset(filterPreset === preset ? '' : preset)}
+                  title="Click to filter by this preset"
+                  style={{ cursor: 'pointer' }}
+                >
                   <span className="preset-dist-name">{preset}</span>
                   <span className="preset-dist-count">{count}</span>
                 </div>
@@ -344,6 +429,52 @@ function Analysis() {
           </button>
         </div>
 
+        {/* Filter bar */}
+        {activeTab === 'all' && (
+          <div className="filter-bar">
+            <select
+              className="filter-select"
+              value={filterStyle}
+              onChange={e => setFilterStyle(e.target.value)}
+            >
+              <option value="">All styles</option>
+              {uniqueStyles.map(s => (
+                <option key={s} value={s}>{s.replace(/_/g, ' ')}</option>
+              ))}
+            </select>
+            <select
+              className="filter-select"
+              value={filterPreset}
+              onChange={e => setFilterPreset(e.target.value)}
+            >
+              <option value="">All presets</option>
+              {uniquePresets.map(p => (
+                <option key={p} value={p}>{p}</option>
+              ))}
+            </select>
+            <select
+              className="filter-select"
+              value={filterQuality}
+              onChange={e => setFilterQuality(e.target.value)}
+            >
+              {QUALITY_OPTIONS.map(o => (
+                <option key={o.value} value={o.value}>{o.label}</option>
+              ))}
+            </select>
+            {hasActiveFilters && (
+              <button
+                className="btn btn-small"
+                onClick={() => { setFilterStyle(''); setFilterPreset(''); setFilterQuality('') }}
+              >
+                Clear filters ({filteredPhotos.length} shown)
+              </button>
+            )}
+            {!hasActiveFilters && (
+              <span className="muted" style={{ fontSize: '0.8rem' }}>{filteredPhotos.length} photos</span>
+            )}
+          </div>
+        )}
+
         <div className="selection-controls">
           <button className="btn btn-small" onClick={selectAll}>Select All</button>
           {selectedIds.size > 0 && (
@@ -352,14 +483,14 @@ function Analysis() {
           <span className="muted" style={{ fontSize: '0.8rem' }}>
             {selectedIds.size > 0
               ? `${selectedIds.size} selected`
-              : 'Click checkboxes to select photos'}
+              : 'Click a photo to open it · use checkboxes to select multiple'}
           </span>
         </div>
 
         {activeTab === 'shortlist' && shortlistPhotos.length === 0 && (
           <div className="empty-state" style={{ padding: '40px 0' }}>
             <p>No photos shortlisted yet.</p>
-            <p className="muted">Switch to All Photos, select the ones you want, and click "Add to Shortlist".</p>
+            <p className="muted">Switch to All Photos, select photos using the checkboxes, then click "Shortlist".</p>
           </div>
         )}
 
@@ -419,6 +550,14 @@ function Analysis() {
             >
               {downloading ? 'Zipping...' : `Download (${selectedIds.size})`}
             </button>
+            <button
+              className="btn btn-danger btn-small"
+              onClick={() => handleArchive([...selectedIds])}
+              disabled={bulkRunning}
+              title="Move selected photos to archived/ — out of the pipeline but not deleted"
+            >
+              Archive ({selectedIds.size})
+            </button>
             {activeTab === 'all' && (
               <>
                 <div className="fab-divider" />
@@ -471,10 +610,11 @@ function Analysis() {
           photo={selectedPhoto}
           result={selectedResult}
           runId={runId}
-          onClose={() => {
-            setSelectedPhoto(null)
-            setSelectedResult(null)
-          }}
+          onClose={() => { setSelectedPhoto(null); setSelectedResult(null) }}
+          onPrev={displayPhotos.findIndex(p => p.id === selectedPhoto.id) > 0
+            ? () => handlePhotoNav(-1) : null}
+          onNext={displayPhotos.findIndex(p => p.id === selectedPhoto.id) < displayPhotos.length - 1
+            ? () => handlePhotoNav(1) : null}
         />
       )}
     </div>

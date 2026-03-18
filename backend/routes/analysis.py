@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Query
+from pydantic import BaseModel
 
 from backend import config
 from backend.gemini.client import analyze_photo, estimate_cost
@@ -362,6 +363,70 @@ async def list_runs():
             continue
 
     return {"runs": runs}
+
+
+class ArchiveRequest(BaseModel):
+    photo_ids: list[str]
+
+
+@router.post("/photos/archive")
+async def archive_photos(req: ArchiveRequest):
+    """
+    Move photos to data/archived/ — removes them from the active pipeline
+    without deleting them. Works on photos in any folder.
+    """
+    config.ARCHIVED_DIR.mkdir(parents=True, exist_ok=True)
+
+    results = []
+    errors = []
+
+    for photo_id in req.photo_ids:
+        path = _find_photo_by_id(photo_id)
+        if not path or not path.exists():
+            errors.append({"photo_id": photo_id, "error": "Photo not found"})
+            continue
+        if path.parent.resolve() == config.ARCHIVED_DIR.resolve():
+            results.append({"photo_id": photo_id, "filename": path.name, "status": "already_archived"})
+            continue
+        try:
+            new_path = _move_to_folder(path, config.ARCHIVED_DIR)
+            results.append({"photo_id": photo_id, "filename": new_path.name, "status": "archived"})
+        except Exception as e:
+            errors.append({"photo_id": photo_id, "error": str(e)})
+
+    return {
+        "archived": len([r for r in results if r["status"] == "archived"]),
+        "errors": len(errors),
+        "results": results,
+        "error_details": errors,
+    }
+
+
+@router.post("/photos/unarchive")
+async def unarchive_photos(req: ArchiveRequest):
+    """Move photos from archived/ back to analyzed/ so they re-enter the pipeline."""
+    config.ANALYZED_DIR.mkdir(parents=True, exist_ok=True)
+
+    results = []
+    errors = []
+
+    for photo_id in req.photo_ids:
+        path = _find_photo_by_id(photo_id)
+        if not path or not path.exists():
+            errors.append({"photo_id": photo_id, "error": "Photo not found"})
+            continue
+        try:
+            new_path = _move_to_folder(path, config.ANALYZED_DIR)
+            results.append({"photo_id": photo_id, "filename": new_path.name, "status": "unarchived"})
+        except Exception as e:
+            errors.append({"photo_id": photo_id, "error": str(e)})
+
+    return {
+        "unarchived": len([r for r in results if r["status"] == "unarchived"]),
+        "errors": len(errors),
+        "results": results,
+        "error_details": errors,
+    }
 
 
 @router.get("/runs/{run_id}")

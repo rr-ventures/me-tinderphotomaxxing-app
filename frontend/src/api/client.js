@@ -229,6 +229,14 @@ export async function retryFailed(runId) {
   return post(`/analyze/retry/${runId}`)
 }
 
+export async function archivePhotos(photoIds) {
+  return postJson('/photos/archive', { photo_ids: photoIds })
+}
+
+export async function unarchivePhotos(photoIds) {
+  return postJson('/photos/unarchive', { photo_ids: photoIds })
+}
+
 export async function getAnalysisProgress() {
   return get('/analyze/batch/progress')
 }

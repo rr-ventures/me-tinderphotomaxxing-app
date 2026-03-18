@@ -103,24 +103,44 @@ MEDIA_TYPES = {
 
 @router.get("/photos")
 async def list_photos():
+    import asyncio
+    import concurrent.futures
+
     config.INPUT_DIR.mkdir(parents=True, exist_ok=True)
     config.ANALYZED_DIR.mkdir(parents=True, exist_ok=True)
     paths = scan_image_paths(include_analyzed=True)
-    photos = []
 
-    for path in paths:
+    def _build_photo_entry(path: Path) -> dict:
         photo_id = _photo_id(path)
         info = get_image_info(path)
-        try:
-            get_or_create_thumbnail(path)
+        thumb_path = config.THUMBNAILS_DIR / f"{photo_id}.jpg"
+        if thumb_path.exists():
             thumbnail_url = f"/thumbnails/{photo_id}.jpg"
-        except Exception:
-            thumbnail_url = None
+        else:
+            try:
+                get_or_create_thumbnail(path)
+                thumbnail_url = f"/thumbnails/{photo_id}.jpg"
+            except Exception:
+                thumbnail_url = None
 
-        photos.append({
+        # Determine which pipeline folder this photo is in
+        parent = path.parent.resolve()
+        if parent == config.INPUT_DIR.resolve():
+            folder = "to_process"
+        elif parent == config.ANALYZED_DIR.resolve():
+            folder = "analyzed"
+        elif parent == config.ERRORED_DIR.resolve():
+            folder = "errored"
+        elif parent == config.ARCHIVED_DIR.resolve():
+            folder = "archived"
+        else:
+            folder = "other"
+
+        return {
             "id": photo_id,
             "filename": path.name,
             "path": str(path),
+            "folder": folder,
             "width": info.get("width", 0),
             "height": info.get("height", 0),
             "size_kb": info.get("size_kb", 0),
@@ -130,7 +150,13 @@ async def list_photos():
             "rotation_degrees": info.get("rotation_degrees", 0),
             "needs_upscale": info.get("needs_upscale", False),
             "short_side": info.get("short_side", 0),
-        })
+        }
+
+    loop = asyncio.get_event_loop()
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+        photos = list(await asyncio.gather(
+            *[loop.run_in_executor(pool, _build_photo_entry, p) for p in paths]
+        ))
 
     return {"photos": photos, "total": len(photos)}
 

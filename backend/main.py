@@ -31,6 +31,7 @@ app.include_router(models_router, prefix="/api")
 config.THUMBNAILS_DIR.mkdir(parents=True, exist_ok=True)
 config.ANALYZED_DIR.mkdir(parents=True, exist_ok=True)
 config.ERRORED_DIR.mkdir(parents=True, exist_ok=True)
+config.ARCHIVED_DIR.mkdir(parents=True, exist_ok=True)
 app.mount(
     "/thumbnails",
     StaticFiles(directory=str(config.THUMBNAILS_DIR)),
