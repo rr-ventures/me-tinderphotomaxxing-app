@@ -27,6 +27,7 @@ from backend.gemini.client import analyze_photo, estimate_cost
 from backend.analysis.selector import select_styles_from_dict
 from backend.analysis.preset_matcher import get_recommendation
 from backend.images.scanner import scan_image_paths, scan_all_image_paths
+from backend.routes.photos import _invalidate_photo_index
 
 router = APIRouter(tags=["analysis"])
 
@@ -580,3 +581,104 @@ async def download_run_photos(
         filename=zip_filename,
         background=BackgroundTask(os.unlink, zip_path),
     )
+
+
+# ── Reset / Clear ─────────────────────────────────────────────────────────────
+
+class ResetRequest(BaseModel):
+    mode: str  # "new_batch" | "full_wipe"
+
+
+@router.post("/reset")
+async def reset_app(req: ResetRequest):
+    """
+    Reset the app state so a new batch can be started.
+
+    mode="new_batch":
+      - Moves all photos from analyzed/ and archived/ back to to_process/
+        so they can be re-uploaded or re-analysed (keeps the files)
+      - Clears all run JSONs from runs/
+      - Clears all thumbnails and info caches from thumbnails/
+      - Resets saved.json and shortlist.json to empty
+      - Leaves processed/ (exported edits) untouched
+
+    mode="full_wipe":
+      - Deletes all photos from analyzed/, archived/, errored/, to_process/
+      - Deletes all run JSONs from runs/
+      - Deletes all thumbnails from thumbnails/
+      - Resets saved.json and shortlist.json to empty
+      - Leaves processed/ (exported edits) untouched
+    """
+    import json as _json
+
+    if req.mode not in ("new_batch", "full_wipe"):
+        raise HTTPException(status_code=400, detail="mode must be 'new_batch' or 'full_wipe'")
+
+    stats = {
+        "photos_moved": 0,
+        "photos_deleted": 0,
+        "runs_deleted": 0,
+        "thumbnails_deleted": 0,
+    }
+
+    # ── 1. Handle photos ──────────────────────────────────────────────────────
+    photo_dirs = [config.ANALYZED_DIR, config.ARCHIVED_DIR, config.ERRORED_DIR]
+    exts = config.SUPPORTED_EXTENSIONS
+
+    if req.mode == "new_batch":
+        config.INPUT_DIR.mkdir(parents=True, exist_ok=True)
+        for src_dir in photo_dirs:
+            if not src_dir.exists():
+                continue
+            for f in src_dir.iterdir():
+                if f.is_file() and f.suffix.lower() in exts:
+                    dest = config.INPUT_DIR / f.name
+                    # Avoid overwriting if same filename already exists
+                    if dest.exists():
+                        stem = f.stem
+                        suffix = f.suffix
+                        counter = 1
+                        while dest.exists():
+                            dest = config.INPUT_DIR / f"{stem}_{counter}{suffix}"
+                            counter += 1
+                    shutil.move(str(f), str(dest))
+                    stats["photos_moved"] += 1
+
+    elif req.mode == "full_wipe":
+        all_photo_dirs = photo_dirs + [config.INPUT_DIR]
+        for src_dir in all_photo_dirs:
+            if not src_dir.exists():
+                continue
+            for f in src_dir.iterdir():
+                if f.is_file() and f.suffix.lower() in exts:
+                    f.unlink()
+                    stats["photos_deleted"] += 1
+
+    # ── 2. Clear all run JSONs ────────────────────────────────────────────────
+    if config.RUNS_DIR.exists():
+        for f in config.RUNS_DIR.iterdir():
+            if f.is_file() and f.suffix == ".json":
+                f.unlink()
+                stats["runs_deleted"] += 1
+
+    # ── 3. Clear thumbnails and info caches ───────────────────────────────────
+    if config.THUMBNAILS_DIR.exists():
+        for f in config.THUMBNAILS_DIR.iterdir():
+            if f.is_file() and f.suffix in (".jpg", ".json"):
+                f.unlink()
+                stats["thumbnails_deleted"] += 1
+
+    # ── 4. Reset saved.json and shortlist.json ────────────────────────────────
+    empty_list = {"photo_ids": [], "run_id": None}
+    for json_file in (config.SAVED_FILE, config.SHORTLIST_FILE):
+        config.DATA_DIR.mkdir(parents=True, exist_ok=True)
+        with open(json_file, "w") as f:
+            _json.dump(empty_list, f)
+
+    _invalidate_photo_index()
+
+    return {
+        "status": "ok",
+        "mode": req.mode,
+        **stats,
+    }

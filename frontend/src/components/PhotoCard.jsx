@@ -1,4 +1,6 @@
-function PhotoCard({ photo, result, onClick, selectable, selected, onSelect, isSaved, isShortlisted, onShortlist }) {
+import { memo } from 'react'
+
+function PhotoCard({ photo, result, onClick, selectable, selected, onSelect, isSaved, isShortlisted, onShortlist, isArchived, onArchive }) {
   const presetName = result?.preset_recommendation?.preset?.name
   const quality = result?.metadata?.photo_quality
   const qualityColor = quality >= 8 ? '#22c55e' : quality >= 6 ? '#f59e0b' : quality ? '#ef4444' : null
@@ -13,9 +15,14 @@ function PhotoCard({ photo, result, onClick, selectable, selected, onSelect, isS
     onShortlist?.(photo.id)
   }
 
+  function handleArchiveClick(e) {
+    e.stopPropagation()
+    onArchive?.(photo.id)
+  }
+
   return (
     <div
-      className={`photo-card ${selected ? 'photo-card-selected' : ''} ${isShortlisted ? 'photo-card-shortlisted' : ''}`}
+      className={`photo-card ${selected ? 'photo-card-selected' : ''} ${isShortlisted ? 'photo-card-shortlisted' : ''} ${isArchived ? 'photo-card-archived' : ''}`}
       onClick={onClick}
     >
       <div className="photo-card-image">
@@ -24,6 +31,8 @@ function PhotoCard({ photo, result, onClick, selectable, selected, onSelect, isS
             src={photo.thumbnail_url}
             alt={photo.filename}
             loading="lazy"
+            width="300"
+            height="300"
           />
         ) : (
           <div className="photo-placeholder">No preview</div>
@@ -39,7 +48,7 @@ function PhotoCard({ photo, result, onClick, selectable, selected, onSelect, isS
           </div>
         )}
 
-        {/* Shortlist star — always visible, top-left */}
+        {/* Shortlist star — top-left */}
         {onShortlist && (
           <button
             className={`photo-card-star ${isShortlisted ? 'photo-card-star-active' : ''}`}
@@ -47,6 +56,17 @@ function PhotoCard({ photo, result, onClick, selectable, selected, onSelect, isS
             title={isShortlisted ? 'Remove from shortlist' : 'Add to shortlist'}
           >
             ★
+          </button>
+        )}
+
+        {/* Archive button — top-right */}
+        {onArchive && (
+          <button
+            className={`photo-card-archive ${isArchived ? 'photo-card-archive-active' : ''}`}
+            onClick={handleArchiveClick}
+            title={isArchived ? 'Restore from archive' : 'Archive (hide from Photos)'}
+          >
+            {isArchived ? '↩' : '⊘'}
           </button>
         )}
 
@@ -87,4 +107,4 @@ function PhotoCard({ photo, result, onClick, selectable, selected, onSelect, isS
   )
 }
 
-export default PhotoCard
+export default memo(PhotoCard)

@@ -1,5 +1,5 @@
-import { useState, useEffect, useMemo } from 'react'
-import { listRuns, getRun, listPhotos, addToSaved, getSaved, getShortlist, addToShortlist, removeFromShortlist, downloadRunPhotos, archivePhotos, getMergedRun } from '../api/client'
+import { useState, useEffect, useMemo, useCallback } from 'react'
+import { listRuns, getRun, listPhotos, addToSaved, getSaved, getShortlist, addToShortlist, removeFromShortlist, downloadRunPhotos, archivePhotos, unarchivePhotos, getArchivedIds, getMergedRun } from '../api/client'
 import PhotoGrid from '../components/PhotoGrid'
 import PhotoDetail from '../components/PhotoDetail'
 
@@ -23,6 +23,7 @@ function Photos() {
   const [selectedPhoto, setSelectedPhoto] = useState(null)
   const [selectedResult, setSelectedResult] = useState(null)
 
+  const [archivedIds, setArchivedIds] = useState(new Set())
   const [selectedIds, setSelectedIds] = useState(new Set())
   const [filterStyle, setFilterStyle] = useState('')
   const [filterQuality, setFilterQuality] = useState('')
@@ -39,11 +40,12 @@ function Photos() {
     async function init() {
       setLoading(true)
       try {
-        const [runsData, savedData, slData] = await Promise.all([listRuns(), getSaved(), getShortlist()])
+        const [runsData, savedData, slData, archData] = await Promise.all([listRuns(), getSaved(), getShortlist(), getArchivedIds()])
         const allRuns = runsData.runs || []
         setRuns(allRuns)
         setSavedIds(new Set(savedData.photo_ids || []))
         setShortlistIds(new Set(slData.photo_ids || []))
+        setArchivedIds(new Set(archData.photo_ids || []))
         if (allRuns.length > 0) {
           setSelectedRunId(allRuns[0].run_id)
         } else {
@@ -134,31 +136,33 @@ function Photos() {
 
   const hasActiveFilters = !!(filterStyle || filterPreset || filterQuality)
 
-  function handlePhotoClick(photo, result) {
+  const handlePhotoClick = useCallback((photo, result) => {
     setSelectedPhoto(photo)
     setSelectedResult(result || resultByFilename[photo.filename] || null)
-  }
+  }, [resultByFilename])
 
-  function handlePhotoNav(direction) {
-    if (!selectedPhoto) return
-    const idx = filteredPhotos.findIndex(p => p.id === selectedPhoto.id)
-    const nextIdx = idx + direction
-    if (nextIdx < 0 || nextIdx >= filteredPhotos.length) return
-    const next = filteredPhotos[nextIdx]
-    setSelectedPhoto(next)
-    setSelectedResult(resultByFilename[next.filename] || null)
-  }
+  const handlePhotoNav = useCallback((direction) => {
+    setSelectedPhoto(prev => {
+      if (!prev) return prev
+      const idx = filteredPhotos.findIndex(p => p.id === prev.id)
+      const nextIdx = idx + direction
+      if (nextIdx < 0 || nextIdx >= filteredPhotos.length) return prev
+      const next = filteredPhotos[nextIdx]
+      setSelectedResult(resultByFilename[next.filename] || null)
+      return next
+    })
+  }, [filteredPhotos, resultByFilename])
 
-  function toggleSelection(photoId) {
+  const toggleSelection = useCallback((photoId) => {
     setSelectedIds(prev => {
       const next = new Set(prev)
       if (next.has(photoId)) next.delete(photoId)
       else next.add(photoId)
       return next
     })
-  }
+  }, [])
 
-  async function handleToggleShortlist(photoId) {
+  const handleToggleShortlist = useCallback(async (photoId) => {
     const isShortlisted = shortlistIds.has(photoId)
     try {
       if (isShortlisted) {
@@ -169,7 +173,27 @@ function Photos() {
         setShortlistIds(prev => new Set([...prev, photoId]))
       }
     } catch { /* silent */ }
-  }
+  }, [shortlistIds, selectedRunId])
+
+  const handleToggleArchive = useCallback(async (photoId) => {
+    const isArchived = archivedIds.has(photoId)
+    try {
+      if (isArchived) {
+        await unarchivePhotos([photoId])
+        setArchivedIds(prev => { const n = new Set(prev); n.delete(photoId); return n })
+      } else {
+        await archivePhotos([photoId])
+        setArchivedIds(prev => new Set([...prev, photoId]))
+        // Close modal if this photo was being viewed
+        if (selectedPhoto?.id === photoId) {
+          setSelectedPhoto(null)
+          setSelectedResult(null)
+        }
+        // Remove from grid immediately
+        setPhotos(prev => prev.filter(p => p.id !== photoId))
+      }
+    } catch { /* silent */ }
+  }, [archivedIds, selectedPhoto])
 
   async function handleAddToSaved() {
     const ids = [...selectedIds]
@@ -214,8 +238,8 @@ function Photos() {
       const res = await archivePhotos(ids)
       setActionStatus({ type: 'success', message: `${res.archived} photo${res.archived !== 1 ? 's' : ''} archived.` })
       setSelectedIds(new Set())
-      const photoData = await listPhotos(selectedRunId)
-      setPhotos(photoData.photos || [])
+      setArchivedIds(prev => new Set([...prev, ...ids]))
+      setPhotos(prev => prev.filter(p => !ids.includes(p.id)))
     } catch (err) {
       setActionStatus({ type: 'error', message: `Archive failed: ${err.message}` })
     } finally {
@@ -223,7 +247,10 @@ function Photos() {
     }
   }
 
-  const currentIdx = selectedPhoto ? filteredPhotos.findIndex(p => p.id === selectedPhoto.id) : -1
+  const currentIdx = useMemo(
+    () => selectedPhoto ? filteredPhotos.findIndex(p => p.id === selectedPhoto.id) : -1,
+    [selectedPhoto, filteredPhotos]
+  )
 
   if (loading) {
     return (
@@ -350,6 +377,8 @@ function Photos() {
         savedIds={savedIds}
         shortlistIds={shortlistIds}
         onShortlist={handleToggleShortlist}
+        archivedIds={archivedIds}
+        onArchive={handleToggleArchive}
       />
 
       {/* Floating action bar when photos are selected */}
@@ -390,6 +419,10 @@ function Photos() {
           onClose={() => { setSelectedPhoto(null); setSelectedResult(null) }}
           onPrev={currentIdx > 0 ? () => handlePhotoNav(-1) : null}
           onNext={currentIdx < filteredPhotos.length - 1 ? () => handlePhotoNav(1) : null}
+          isShortlisted={shortlistIds.has(selectedPhoto.id)}
+          onShortlist={handleToggleShortlist}
+          isArchived={archivedIds.has(selectedPhoto.id)}
+          onArchive={handleToggleArchive}
         />
       )}
     </div>

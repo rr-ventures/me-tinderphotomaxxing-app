@@ -14,7 +14,7 @@ scenarios:
     conditions:
       scene_type: outdoor
       lighting: golden_hour
-      face_visible: [yes, partial]
+      face_visible: ["yes", "partial"]
     preset:
       name: "Adaptive: Subject > Warm Pop"
       path: "Premium > Adaptive: Subject > Warm Pop"
@@ -28,7 +28,7 @@ scenarios:
       scene_type: outdoor
       lighting: [natural_warm, natural_cool]
       color_quality: flat
-      face_visible: [yes, partial]
+      face_visible: ["yes", "partial"]
     preset:
       name: "Adaptive: Subject > Light"
       path: "Premium > Adaptive: Subject > Light"
@@ -41,7 +41,7 @@ scenarios:
     conditions:
       scene_type: outdoor
       lighting: natural_warm
-      face_visible: [yes, partial]
+      face_visible: ["yes", "partial"]
     preset:
       name: "Adaptive: Portrait > Polished Portrait"
       path: "Premium > Adaptive: Portrait > Polished Portrait"
@@ -54,7 +54,7 @@ scenarios:
     conditions:
       scene_type: indoor
       lighting: [natural_warm, natural_cool]
-      face_visible: [yes, partial]
+      face_visible: ["yes", "partial"]
     preset:
       name: "Adaptive: Subject > Warm Light"
       path: "Premium > Adaptive: Subject > Warm Light"
@@ -67,7 +67,7 @@ scenarios:
     conditions:
       scene_type: indoor
       lighting: artificial
-      face_visible: [yes, partial]
+      face_visible: ["yes", "partial"]
     preset:
       name: "Adaptive: Portrait > Enhance Portrait"
       path: "Premium > Adaptive: Portrait > Enhance Portrait"
@@ -80,7 +80,7 @@ scenarios:
     conditions:
       scene_type: indoor
       lighting: mixed
-      face_visible: [yes, partial]
+      face_visible: ["yes", "partial"]
     preset:
       name: "Adaptive: Portrait > Polished Portrait"
       path: "Premium > Adaptive: Portrait > Polished Portrait"
@@ -93,7 +93,7 @@ scenarios:
     conditions:
       scene_type: urban
       lighting: [natural_warm, natural_cool, golden_hour]
-      face_visible: [yes, partial]
+      face_visible: ["yes", "partial"]
     preset:
       name: "Style: Cinematic"
       path: "Premium > Style: Cinematic"
@@ -140,7 +140,7 @@ scenarios:
     name: "Hiking/nature/sports activity"
     conditions:
       scene_type: outdoor
-      face_visible: [yes, partial, no]
+      face_visible: ["yes", "partial", "no"]
     preset:
       name: "Adaptive: Subject > Vibrant"
       path: "Premium > Adaptive: Subject > Vibrant"
@@ -151,7 +151,7 @@ scenarios:
   - id: group_social_good_light
     name: "Group/social photo, well-lit"
     conditions:
-      face_visible: [yes, partial]
+      face_visible: ["yes", "partial"]
     preset:
       name: "Portraits: Group"
       path: "Premium > Portraits: Group"
@@ -163,6 +163,8 @@ scenarios:
     name: "Group/social photo, low light"
     conditions:
       lighting: [artificial, mixed]
+      # Pop is for lifting underexposed shots; well-exposed indoor (e.g. sauna) should not match on lighting alone.
+      photo_quality: [0, 1, 2, 3, 4, 5]
     preset:
       name: "Adaptive: Subject > Pop"
       path: "Premium > Adaptive: Subject > Pop"
@@ -174,7 +176,7 @@ scenarios:
     name: "Full body/outfit shot, outdoor"
     conditions:
       scene_type: outdoor
-      face_visible: [yes, partial, no]
+      face_visible: ["yes", "partial", "no"]
     preset:
       name: "Adaptive: Subject > Light"
       path: "Premium > Adaptive: Subject > Light"
@@ -186,7 +188,7 @@ scenarios:
     name: "Full body/outfit shot, indoor"
     conditions:
       scene_type: indoor
-      face_visible: [yes, partial, no]
+      face_visible: ["yes", "partial", "no"]
     preset:
       name: "Adaptive: Subject > Warm Light"
       path: "Premium > Adaptive: Subject > Warm Light"
@@ -197,7 +199,7 @@ scenarios:
   - id: professional_formal
     name: "Professional/formal/dressed up"
     conditions:
-      face_visible: [yes, partial]
+      face_visible: ["yes", "partial"]
     preset:
       name: "Adaptive: Portrait > Polished Portrait"
       path: "Premium > Adaptive: Portrait > Polished Portrait"
@@ -251,7 +253,7 @@ scenarios:
   - id: face_in_shadow
     name: "Face partially in shadow"
     conditions:
-      face_visible: partial
+      face_visible: "partial"
     preset:
       name: "Adaptive: Portrait > Enhance Portrait"
       path: "Premium > Adaptive: Portrait > Enhance Portrait"
@@ -262,7 +264,7 @@ scenarios:
   - id: skin_blemishes
     name: "Visible skin blemishes or uneven skin"
     conditions:
-      face_visible: yes
+      face_visible: "yes"
     preset:
       name: "Adaptive: Portrait > Smooth Facial Skin"
       path: "Premium > Adaptive: Portrait > Smooth Facial Skin"

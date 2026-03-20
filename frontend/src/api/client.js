@@ -182,22 +182,72 @@ export async function getCropOptions(photoId, runId) {
   return get(`/photos/${photoId}/crop-recommendation${params}`)
 }
 
-export async function upscalePreviewUrl(photoId, { crop, adjustments, mode } = {}) {
-  const response = await fetch(`${API_BASE}/photos/${photoId}/upscale-preview`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      crop: crop || null,
-      adjustments: adjustments || null,
-      mode: mode || 'enhance',
-    }),
+/**
+ * AI enhancement preview. Uses XMLHttpRequest so we can report real download progress
+ * when the server sends Content-Length (JPEG response).
+ * @param {function(number): void} [onProgress] — 0–100 while the request is in flight
+ */
+export function upscalePreviewUrl(photoId, { crop, adjustments, mode, onProgress } = {}) {
+  const body = JSON.stringify({
+    crop: crop || null,
+    adjustments: adjustments || null,
+    mode: mode || 'enhance',
   })
-  if (!response.ok) {
-    const error = await response.json().catch(() => ({ detail: response.statusText }))
-    throw new Error(error.detail || 'Upscale failed')
-  }
-  const blob = await response.blob()
-  return URL.createObjectURL(blob)
+
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest()
+    xhr.open('POST', `${API_BASE}/photos/${photoId}/upscale-preview`)
+    xhr.responseType = 'blob'
+    xhr.setRequestHeader('Content-Type', 'application/json')
+
+    let lastPct = -1
+    const report = (fraction) => {
+      if (!onProgress) return
+      const p = Math.min(100, Math.max(0, Math.round(fraction * 100)))
+      if (p !== lastPct) {
+        lastPct = p
+        onProgress(p)
+      }
+    }
+
+    xhr.upload.addEventListener('loadstart', () => report(0.02))
+    xhr.upload.addEventListener('progress', (e) => {
+      if (e.lengthComputable && e.total > 0) {
+        report((e.loaded / e.total) * 0.04)
+      }
+    })
+    xhr.upload.addEventListener('loadend', () => report(0.05))
+
+    xhr.addEventListener('progress', (e) => {
+      if (e.lengthComputable && e.total > 0) {
+        report(0.05 + (e.loaded / e.total) * 0.94)
+      }
+    })
+
+    xhr.onload = () => {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        report(1)
+        resolve(URL.createObjectURL(xhr.response))
+        return
+      }
+      const fail = (msg) => reject(new Error(msg || 'Upscale failed'))
+      const blob = xhr.response
+      if (blob && typeof blob.text === 'function') {
+        blob.text().then((t) => {
+          try {
+            const err = JSON.parse(t)
+            fail(err.detail)
+          } catch {
+            fail(t || xhr.statusText)
+          }
+        }).catch(() => fail(xhr.statusText))
+      } else {
+        fail(xhr.statusText)
+      }
+    }
+    xhr.onerror = () => reject(new Error('Network error'))
+    xhr.send(body)
+  })
 }
 
 export async function listProcessed() {
@@ -228,6 +278,10 @@ export async function analyzeBatch(model, limit, allFolders = false) {
 
 export async function retryFailed(runId) {
   return post(`/analyze/retry/${runId}`)
+}
+
+export async function getArchivedIds() {
+  return get('/photos/archived')
 }
 
 export async function archivePhotos(photoIds) {
@@ -327,4 +381,8 @@ export async function estimateCost(model, numImages) {
 
 export async function healthCheck() {
   return get('/health')
+}
+
+export async function resetApp(mode) {
+  return postJson('/reset', { mode })
 }

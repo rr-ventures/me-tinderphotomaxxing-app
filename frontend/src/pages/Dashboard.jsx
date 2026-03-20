@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { useNavigate, Link } from 'react-router-dom'
-import { analyzeBatch, listRuns, uploadPhotos, getAnalysisProgress, getFolderCounts, deleteRun } from '../api/client'
+import { analyzeBatch, listRuns, uploadPhotos, getAnalysisProgress, getFolderCounts, deleteRun, resetApp, getShortlist, getSaved, getArchivedIds } from '../api/client'
 import ModelSelector from '../components/ModelSelector'
 import CostEstimate from '../components/CostEstimate'
 
@@ -22,6 +22,14 @@ function Dashboard() {
   const [analysisProgress, setAnalysisProgress] = useState(null)
   const progressPollRef = useRef(null)
 
+  // New Batch / Reset state
+  const [resetCounts, setResetCounts] = useState(null)
+  const [confirmMode, setConfirmMode] = useState(null)
+  const [confirmText, setConfirmText] = useState('')
+  const [resetting, setResetting] = useState(false)
+  const [resetResult, setResetResult] = useState(null)
+  const [resetError, setResetError] = useState(null)
+
   const navigate = useNavigate()
 
   useEffect(() => {
@@ -35,18 +43,49 @@ function Dashboard() {
     setLoading(true)
     setError(null)
     try {
-      const [runsData, counts] = await Promise.all([
+      const [runsData, counts, sl, saved, arch] = await Promise.all([
         listRuns(),
         getFolderCounts(),
+        getShortlist(),
+        getSaved(),
+        getArchivedIds(),
       ])
       setRuns(runsData.runs || [])
       setFolderCounts(counts)
+      setResetCounts({
+        analyzed: counts.analyzed ?? 0,
+        archived: arch.photo_ids?.length ?? 0,
+        shortlisted: sl.photo_ids?.length ?? 0,
+        saved: saved.photo_ids?.length ?? 0,
+        toProcess: counts.to_process ?? 0,
+      })
     } catch (err) {
       setError(err.message)
     } finally {
       setLoading(false)
     }
   }
+
+  async function handleReset() {
+    if (!confirmMode) return
+    setResetting(true)
+    setResetError(null)
+    setResetResult(null)
+    try {
+      const result = await resetApp(confirmMode)
+      setResetResult(result)
+      setConfirmMode(null)
+      setConfirmText('')
+      await loadAll()
+    } catch (err) {
+      setResetError(err.message)
+    } finally {
+      setResetting(false)
+    }
+  }
+
+  const CONFIRM_WORD = confirmMode === 'full_wipe' ? 'DELETE' : 'RESET'
+  const confirmReady = confirmText.trim().toUpperCase() === CONFIRM_WORD
 
   const toProcessCount = folderCounts?.to_process ?? 0
 
@@ -318,6 +357,149 @@ function Dashboard() {
           </button>
         </div>
       )}
+
+      {/* ── New Batch / Reset — collapsed at the bottom ── */}
+      <details className="runs-history">
+        <summary className="runs-history-summary">
+          Start a New Batch / Reset
+        </summary>
+        <div style={{ marginTop: 12 }}>
+          <p className="muted" style={{ marginBottom: 16 }}>
+            Clear the current batch and start fresh — re-queue photos for re-analysis, or do a full wipe.
+          </p>
+
+          {resetCounts && (
+            <div className="reset-counts">
+              <div className="reset-count-item">
+                <span className="reset-count-num">{resetCounts.analyzed}</span>
+                <span className="reset-count-label">Analysed</span>
+              </div>
+              <div className="reset-count-item">
+                <span className="reset-count-num">{resetCounts.archived}</span>
+                <span className="reset-count-label">Archived</span>
+              </div>
+              <div className="reset-count-item">
+                <span className="reset-count-num">{resetCounts.shortlisted}</span>
+                <span className="reset-count-label">Shortlisted</span>
+              </div>
+              <div className="reset-count-item">
+                <span className="reset-count-num">{resetCounts.saved}</span>
+                <span className="reset-count-label">Saved</span>
+              </div>
+              <div className="reset-count-item">
+                <span className="reset-count-num">{resetCounts.toProcess}</span>
+                <span className="reset-count-label">To Process</span>
+              </div>
+            </div>
+          )}
+
+          {resetResult && (
+            <div className="alert alert-success" style={{ marginBottom: 16 }}>
+              {resetResult.mode === 'new_batch'
+                ? `Done — ${resetResult.photos_moved} photo${resetResult.photos_moved !== 1 ? 's' : ''} moved back to the upload queue, ${resetResult.runs_deleted} run${resetResult.runs_deleted !== 1 ? 's' : ''} cleared.`
+                : `Done — ${resetResult.photos_deleted} photo${resetResult.photos_deleted !== 1 ? 's' : ''} deleted, ${resetResult.runs_deleted} run${resetResult.runs_deleted !== 1 ? 's' : ''} cleared.`
+              }
+              <button onClick={() => setResetResult(null)} className="alert-dismiss">✕</button>
+            </div>
+          )}
+
+          {resetError && (
+            <div className="alert alert-error" style={{ marginBottom: 16 }}>
+              Reset failed: {resetError}
+              <button onClick={() => setResetError(null)} className="alert-dismiss">✕</button>
+            </div>
+          )}
+
+          <div className="reset-options">
+            <div className={`reset-option-card ${confirmMode === 'new_batch' ? 'reset-option-active' : ''}`}>
+              <div className="reset-option-header">
+                <div className="reset-option-icon reset-icon-soft">↺</div>
+                <div>
+                  <h3>New Batch</h3>
+                  <p className="muted">Keep your photos — just re-queue them for analysis</p>
+                </div>
+              </div>
+              <ul className="reset-checklist">
+                <li className="reset-check-yes">✓ Moves all analysed &amp; archived photos back to the upload queue</li>
+                <li className="reset-check-yes">✓ Clears all analysis runs and results</li>
+                <li className="reset-check-yes">✓ Resets shortlist and saved lists</li>
+                <li className="reset-check-no">✗ Does NOT delete any photos from disk</li>
+              </ul>
+              {confirmMode !== 'new_batch' ? (
+                <button
+                  className="btn btn-secondary"
+                  onClick={() => { setConfirmMode('new_batch'); setConfirmText('') }}
+                  disabled={resetting}
+                >
+                  New Batch…
+                </button>
+              ) : (
+                <div className="reset-confirm-box">
+                  <p>Type <strong>RESET</strong> to confirm:</p>
+                  <div className="reset-confirm-row">
+                    <input
+                      className="reset-confirm-input"
+                      value={confirmText}
+                      onChange={e => setConfirmText(e.target.value)}
+                      placeholder="RESET"
+                      autoFocus
+                    />
+                    <button className="btn btn-primary" onClick={handleReset} disabled={!confirmReady || resetting}>
+                      {resetting ? 'Resetting…' : 'Confirm Reset'}
+                    </button>
+                    <button className="btn btn-small" onClick={() => { setConfirmMode(null); setConfirmText('') }}>
+                      Cancel
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            <div className={`reset-option-card reset-option-danger ${confirmMode === 'full_wipe' ? 'reset-option-active' : ''}`}>
+              <div className="reset-option-header">
+                <div className="reset-option-icon reset-icon-danger">⚠</div>
+                <div>
+                  <h3>Full Wipe</h3>
+                  <p className="muted">Delete everything and start completely from scratch</p>
+                </div>
+              </div>
+              <ul className="reset-checklist">
+                <li className="reset-check-danger">✗ Permanently deletes ALL photos from disk</li>
+                <li className="reset-check-yes">✓ Clears all runs, shortlist, saved</li>
+                <li className="reset-check-no">✗ Does NOT touch your exported/processed photos</li>
+              </ul>
+              {confirmMode !== 'full_wipe' ? (
+                <button
+                  className="btn btn-danger"
+                  onClick={() => { setConfirmMode('full_wipe'); setConfirmText('') }}
+                  disabled={resetting}
+                >
+                  Full Wipe…
+                </button>
+              ) : (
+                <div className="reset-confirm-box">
+                  <p>Type <strong>DELETE</strong> to confirm permanent deletion:</p>
+                  <div className="reset-confirm-row">
+                    <input
+                      className="reset-confirm-input reset-confirm-input-danger"
+                      value={confirmText}
+                      onChange={e => setConfirmText(e.target.value)}
+                      placeholder="DELETE"
+                      autoFocus
+                    />
+                    <button className="btn btn-danger" onClick={handleReset} disabled={!confirmReady || resetting}>
+                      {resetting ? 'Deleting…' : 'Confirm Delete'}
+                    </button>
+                    <button className="btn btn-small" onClick={() => { setConfirmMode(null); setConfirmText('') }}>
+                      Cancel
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      </details>
 
       {/* ── Past runs — collapsed at the bottom ── */}
       {!loading && runs.length > 0 && (

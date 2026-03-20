@@ -35,11 +35,36 @@ def _photo_id(path: Path) -> str:
     return hashlib.md5(str(path.resolve()).encode()).hexdigest()[:12]
 
 
+# ── In-memory photo index ─────────────────────────────────────────────────────
+# Maps photo_id → Path. Built lazily on first use, invalidated by any write
+# operation that moves or creates photos (archive, unarchive, upload, reset).
+_photo_index: dict[str, Path] = {}
+_photo_index_valid: bool = False
+
+
+def _invalidate_photo_index() -> None:
+    global _photo_index_valid
+    _photo_index_valid = False
+
+
+def _get_photo_index() -> dict[str, Path]:
+    global _photo_index, _photo_index_valid
+    if not _photo_index_valid:
+        _photo_index = {_photo_id(p): p for p in scan_all_image_paths()}
+        _photo_index_valid = True
+    return _photo_index
+
+
 def _find_photo(photo_id: str) -> Path | None:
-    for path in scan_all_image_paths():
-        if _photo_id(path) == photo_id:
-            return path
-    return None
+    """Look up a photo by ID using the in-memory index. Falls back to full scan if stale."""
+    index = _get_photo_index()
+    path = index.get(photo_id)
+    # Verify the cached path still exists (file may have been moved externally)
+    if path and path.exists():
+        return path
+    # Stale entry — rebuild index and retry once
+    _invalidate_photo_index()
+    return _get_photo_index().get(photo_id)
 
 
 def _sanitize_preset_name(name: str) -> str:
@@ -81,6 +106,42 @@ def _find_run_result(run_id: str, photo_id: str, filename: str | None = None) ->
             if r.get("filename") == filename:
                 return r
     return None
+
+
+def _find_run_result_merged(photo_id: str, filename: str | None = None) -> dict | None:
+    """
+    Find a photo's analysis result using the same rule as GET /runs/merged/all:
+    newest run files first; first hit by image_id, else by filename.
+    """
+    import json as _json
+
+    if not config.RUNS_DIR.exists():
+        return None
+    run_files = sorted(config.RUNS_DIR.glob("*.json"), key=lambda p: p.name, reverse=True)
+    for rf in run_files:
+        if rf.stem == "all":
+            continue
+        try:
+            with open(rf, encoding="utf-8") as f:
+                run_data = _json.load(f)
+        except Exception:
+            continue
+        for r in run_data.get("results", []):
+            if r.get("image_id") == photo_id:
+                return r
+        if filename:
+            for r in run_data.get("results", []):
+                if r.get("filename") == filename:
+                    return r
+    return None
+
+
+def _resolve_run_result(run_id: str | None, photo_id: str, filename: str | None = None) -> dict | None:
+    """Single-run lookup, or merged newest-run resolution when run_id is missing or 'all'."""
+    rid = (run_id or "").strip()
+    if rid and rid != "all":
+        return _find_run_result(rid, photo_id, filename)
+    return _find_run_result_merged(photo_id, filename)
 
 
 def _unique_path(directory: Path, stem: str, suffix: str = ".jpg") -> Path:
@@ -263,6 +324,9 @@ async def upload_photos(files: list[UploadFile] = File(...)):
             out.write(contents)
 
         saved.append({"filename": dest.name, "size_kb": round(len(contents) / 1024, 1)})
+
+    if saved:
+        _invalidate_photo_index()
 
     return {
         "uploaded": len(saved),
@@ -889,24 +953,97 @@ async def batch_process(req: BatchProcessRequest):
 
 
 UPSCALE_PROMPTS = {
+    "hd_restore": (
+        "This image is a low-quality video frame or screenshot — it may have compression blocking, "
+        "motion blur, interlacing artefacts, low bitrate pixelation, or reduced resolution from "
+        "video encoding. Your ONLY task is to restore it to the highest possible pixel quality "
+        "using AI super-resolution reconstruction. This is a pure technical restoration — "
+        "do not make any creative, stylistic, or interpretive changes whatsoever.\n\n"
+        "WHAT TO DO — technical restoration only:\n"
+        "- Apply AI super-resolution: reconstruct missing high-frequency detail and fill in "
+        "pixels lost to video compression, low bitrate, or downsampling\n"
+        "- Remove JPEG/video blocking artefacts: eliminate the blocky 8x8 pixel grid pattern "
+        "caused by DCT compression in video codecs (H.264, H.265, MPEG)\n"
+        "- Remove motion blur and temporal smearing: sharpen edges and subjects that appear "
+        "soft or ghosted due to low frame rate or video encoding\n"
+        "- Remove interlacing lines or comb artefacts if present\n"
+        "- Reduce digital noise and colour banding while recovering genuine edge sharpness\n"
+        "- Reconstruct fine detail: sharp edges, crisp text, defined facial features, "
+        "clear fabric texture — whatever was lost to compression\n"
+        "- Output should look like the same frame captured from a high-bitrate 4K source\n\n"
+        "ABSOLUTE CONSTRAINTS — change nothing else:\n"
+        "- Do NOT change any colours, tones, white balance, brightness, or contrast\n"
+        "- Do NOT change the composition, framing, or crop in any way\n"
+        "- Do NOT change any person's face, expression, body, or identity\n"
+        "- Do NOT add background blur, vignette, or any photographic effect\n"
+        "- Do NOT apply any beauty filter, skin smoothing, or AI enhancement beyond "
+        "pure resolution and artefact removal\n"
+        "- Do NOT hallucinate or invent detail that was not present — only reconstruct "
+        "what was genuinely there but lost to compression\n"
+        "- Do NOT change the mood, style, or look of the image in any way\n\n"
+        "The result must be pixel-for-pixel identical in content to the input, "
+        "just at dramatically higher quality and resolution. It should look like "
+        "the exact same moment captured by a high-end camera at full resolution."
+    ),
     "clarity": (
-        "Increase the resolution and sharpness of this photo. "
-        "Focus only on improving pixel clarity, reducing blur and noise, "
-        "and adding fine detail. Do NOT change the lighting, colors, contrast, "
-        "mood, or style in any way. The result should look identical to the "
-        "original but with higher resolution and sharper detail."
+        "You are a professional photo retouching tool. Your task is to sharpen and clarify "
+        "this photo so it looks like it was taken with a higher-quality camera — without any "
+        "detectable AI processing.\n\n"
+        "WHAT TO DO:\n"
+        "- Apply deconvolution-style sharpening to recover edge definition and micro-detail lost to lens softness or camera shake\n"
+        "- Reduce digital noise and compression artifacts while preserving genuine film-like texture\n"
+        "- Increase perceived resolution and acuity — the photo should look like it was shot on a Sony A7 IV or Canon R5 at f/2.8, ISO 100\n"
+        "- Recover fine detail: individual hair strands, fabric weave, skin pores, eyelashes, background texture\n"
+        "- Improve local contrast and micro-contrast so edges and surfaces appear crisply defined\n"
+        "- Preserve the exact same colours, white balance, exposure, and mood — do not shift tones\n\n"
+        "STRICT IDENTITY LOCK — do NOT change:\n"
+        "- Face shape, bone structure, jaw, eyes, nose, mouth, or any facial proportion\n"
+        "- Expression, pose, or body position\n"
+        "- Background content, background colours, or framing\n"
+        "- Lighting direction, lighting quality, or shadow placement\n"
+        "- Skin tone, hair colour, eye colour, or clothing colour\n\n"
+        "NEGATIVE INSTRUCTIONS — absolutely forbidden:\n"
+        "- No AI smoothing or beauty filters — zero plastic skin effect\n"
+        "- No face morphing or facial enhancement of any kind\n"
+        "- No background replacement or background blurring\n"
+        "- No contrast boost, no colour grading, no saturation changes\n"
+        "- No vignetting, no lens flare, no HDR tonemapping\n"
+        "- No halos around edges from over-sharpening\n\n"
+        "The output must be photorealistic and completely indistinguishable from a genuine high-resolution camera capture. "
+        "It should look like the exact same moment, but shot on a better camera."
     ),
     "enhance": (
-        "Enhance this portrait photo to professional quality. Preserve 100% of the original "
-        "identity — face structure, expression, pose, clothing, and background must remain "
-        "unchanged. Recover fine detail: sharp facial features, natural skin texture with "
-        "visible pores, realistic hair strands, and clean edges. Apply balanced cinematic "
-        "lighting with improved dynamic range — lift shadows slightly, recover highlights, "
-        "without relighting or reshaping. Remove compression artifacts and digital noise. "
-        "Apply controlled sharpening. Do NOT smooth skin artificially, do NOT alter facial "
-        "anatomy, do NOT change colors dramatically. Output should read as a true-to-life "
-        "photorealistic enhancement — the same photo, only clearer, sharper, and higher "
-        "resolution."
+        "You are a professional portrait photographer and retoucher. Your task is to elevate "
+        "this photo to the standard of a high-end professional shoot — naturally and "
+        "undetectably, as if a skilled photographer had taken it under ideal conditions.\n\n"
+        "WHAT TO DO:\n"
+        "- Simulate the look of a photo taken with a Sony A1 + 85mm f/1.4 lens at ISO 100: "
+        "tack-sharp subject, premium colour rendition, cinematic depth\n"
+        "- Sharpen the subject: recover hair detail, skin texture (visible pores, not plastic), "
+        "eye catchlights, fabric texture, and clean edges\n"
+        "- Improve dynamic range: lift blocked shadows to reveal detail, gently recover "
+        "blown highlights — do this subtly, like a skilled dodge-and-burn\n"
+        "- Refine lighting: add soft, natural directionality — warm highlights, slightly cooler "
+        "shadows — as if shot with a large softbox or open sky. Do NOT relight dramatically\n"
+        "- Apply a clean, editorial colour grade: slightly lift midtones, add gentle warmth to "
+        "skin, desaturate distracting background colours very subtly\n"
+        "- Remove sensor noise, compression artefacts, and digital grain — replace with subtle "
+        "natural film-like micro-texture\n"
+        "- Improve overall clarity and perceived resolution\n\n"
+        "STRICT IDENTITY LOCK — do NOT change:\n"
+        "- Face shape, facial anatomy, bone structure, or any facial feature\n"
+        "- Expression, pose, or body language\n"
+        "- Background content or framing — keep environment identical\n"
+        "- Person's apparent age or identity in any way\n\n"
+        "NEGATIVE INSTRUCTIONS — absolutely forbidden:\n"
+        "- No AI beauty filters, skin smoothing, or blemish removal\n"
+        "- No face reshaping, jawline slimming, or eye enlargement\n"
+        "- No dramatic background blur (bokeh) if it wasn't there originally\n"
+        "- No HDR tonemapping, no surreal colour grading, no Instagram-style filters\n"
+        "- No plastic or waxy skin texture\n"
+        "- No obvious AI artefacts or hallucinated details\n\n"
+        "The result must look like the genuine article — a professional photographer "
+        "captured this exact moment under perfect conditions. Completely real, completely natural."
     ),
 }
 
@@ -1094,11 +1231,8 @@ async def get_crop_recommendation_endpoint(photo_id: str, run_id: str = None):
         raise HTTPException(status_code=404, detail="Photo not found")
 
     info = get_image_info(path)
-    metadata = {}
-    if run_id:
-        run_result = _find_run_result(run_id, photo_id, path.name)
-        if run_result:
-            metadata = run_result.get("metadata", {})
+    run_result = _resolve_run_result(run_id, photo_id, path.name)
+    metadata = run_result.get("metadata", {}) if run_result else {}
 
     options = get_crop_options(
         metadata,
@@ -1123,11 +1257,8 @@ async def get_preset_recommendation(photo_id: str, run_id: str = None):
     if not path or not path.exists():
         raise HTTPException(status_code=404, detail="Photo not found")
 
-    metadata = None
-    if run_id:
-        run_result = _find_run_result(run_id, photo_id, path.name)
-        if run_result:
-            metadata = run_result.get("metadata")
+    run_result = _resolve_run_result(run_id, photo_id, path.name)
+    metadata = run_result.get("metadata") if run_result else None
 
     recs = get_recommendations(metadata or {}, max_results=3)
     dangers = get_danger_zones()
@@ -1458,3 +1589,70 @@ async def remove_from_shortlist(req: SavedUpdateRequest):
     data["photo_ids"] = list(existing)
     _write_shortlist(data)
     return {"shortlisted": len(data["photo_ids"])}
+
+
+# ── Archive / Unarchive ───────────────────────────────────────────────────────
+
+class ArchiveRequest(BaseModel):
+    photo_ids: list[str]
+
+
+@router.get("/photos/archived")
+async def get_archived_photo_ids():
+    """Return IDs of all photos currently in the archived/ folder."""
+    config.ARCHIVED_DIR.mkdir(parents=True, exist_ok=True)
+    ids = [_photo_id(p) for p in config.ARCHIVED_DIR.iterdir() if p.is_file()]
+    return {"photo_ids": ids}
+
+
+@router.post("/photos/archive")
+async def archive_photos_route(req: ArchiveRequest):
+    """Move photos from analyzed/ to archived/."""
+    config.ARCHIVED_DIR.mkdir(parents=True, exist_ok=True)
+    archived = []
+    errors = []
+    for photo_id in req.photo_ids:
+        path = _find_photo(photo_id)
+        if not path or not path.exists():
+            errors.append({"photo_id": photo_id, "error": "Not found"})
+            continue
+        # Only move if it's currently in analyzed/ (don't double-archive)
+        if path.parent.resolve() == config.ARCHIVED_DIR.resolve():
+            archived.append(photo_id)
+            continue
+        dest = config.ARCHIVED_DIR / path.name
+        try:
+            import shutil
+            shutil.move(str(path), str(dest))
+            archived.append(photo_id)
+        except Exception as e:
+            errors.append({"photo_id": photo_id, "error": str(e)})
+    if archived:
+        _invalidate_photo_index()
+    return {"archived": len(archived), "errors": errors}
+
+
+@router.post("/photos/unarchive")
+async def unarchive_photos_route(req: ArchiveRequest):
+    """Move photos from archived/ back to analyzed/."""
+    config.ANALYZED_DIR.mkdir(parents=True, exist_ok=True)
+    unarchived = []
+    errors = []
+    for photo_id in req.photo_ids:
+        path = _find_photo(photo_id)
+        if not path or not path.exists():
+            errors.append({"photo_id": photo_id, "error": "Not found"})
+            continue
+        if path.parent.resolve() != config.ARCHIVED_DIR.resolve():
+            errors.append({"photo_id": photo_id, "error": "Photo is not archived"})
+            continue
+        dest = config.ANALYZED_DIR / path.name
+        try:
+            import shutil
+            shutil.move(str(path), str(dest))
+            unarchived.append(photo_id)
+        except Exception as e:
+            errors.append({"photo_id": photo_id, "error": str(e)})
+    if unarchived:
+        _invalidate_photo_index()
+    return {"unarchived": len(unarchived), "errors": errors}

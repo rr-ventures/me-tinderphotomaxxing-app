@@ -36,6 +36,13 @@ You'll need a **Gemini API key** from [Google AI Studio](https://aistudio.google
 
 3. Open [http://localhost:3000](http://localhost:3000)
 
+### Dev Container (VS Code / Cursor)
+
+The dev container **starts the API and Vite for you** whenever the container starts or you attach to it (`scripts/ensure-dev-servers.sh` via `postStartCommand` / `postAttachCommand`). Ports **3000** and **8000** are forwarded automatically.
+
+- If the browser still can’t connect: open the **Ports** view, confirm **3000** is forwarded, and click **Open in Browser**.
+- Manual restart: `bash scripts/ensure-dev-servers.sh` or run the task **Photo Analyser: ensure dev servers**.
+
 ---
 
 ## How to use it

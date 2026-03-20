@@ -13,7 +13,7 @@ scenarios:
   - id: clear_face_primary
     name: "Clear face primary portrait"
     conditions:
-      face_visible: yes
+      face_visible: "yes"
       photo_quality: [7, 8, 9, 10]
     crop:
       aspect_ratio: 0.8
@@ -28,7 +28,7 @@ scenarios:
     conditions:
       scene_type: outdoor
       lighting: [golden_hour, natural_warm]
-      face_visible: yes
+      face_visible: "yes"
       color_quality: good
     crop:
       aspect_ratio: 0.8
@@ -42,7 +42,7 @@ scenarios:
     name: "Indoor face-led portrait"
     conditions:
       scene_type: indoor
-      face_visible: yes
+      face_visible: "yes"
       photo_quality: [6, 7, 8, 9, 10]
     crop:
       aspect_ratio: 0.8
@@ -56,7 +56,7 @@ scenarios:
     name: "Urban portrait with balanced context"
     conditions:
       scene_type: urban
-      face_visible: yes
+      face_visible: "yes"
       photo_quality: [6, 7, 8, 9, 10]
     crop:
       aspect_ratio: 0.8
@@ -71,7 +71,7 @@ scenarios:
     conditions:
       scene_type: [nightlife, indoor]
       lighting: artificial
-      face_visible: yes
+      face_visible: "yes"
     crop:
       aspect_ratio: 0.8
       aspect_label: "4:5"
@@ -83,7 +83,7 @@ scenarios:
   - id: partial_face_context_preserved
     name: "Partial-face photo with context preserved"
     conditions:
-      face_visible: partial
+      face_visible: "partial"
       photo_quality: [5, 6, 7, 8, 9, 10]
     crop:
       aspect_ratio: 0.8
@@ -96,7 +96,7 @@ scenarios:
   - id: no_face_story_photo
     name: "No-face story or activity photo"
     conditions:
-      face_visible: no
+      face_visible: "no"
       photo_quality: [5, 6, 7, 8, 9, 10]
     crop:
       aspect_ratio: 0.75
@@ -109,7 +109,7 @@ scenarios:
   - id: clutter_or_bad_edges_cleanup
     name: "Cluttered edges or messy background cleanup"
     conditions:
-      face_visible: yes
+      face_visible: "yes"
       color_quality: [bad_mix, flat]
     crop:
       aspect_ratio: 1.0
@@ -123,7 +123,7 @@ scenarios:
     name: "Low-quality salvage crop"
     conditions:
       photo_quality: [0, 1, 2, 3, 4]
-      face_visible: [yes, partial]
+      face_visible: ["yes", "partial"]
     crop:
       aspect_ratio: 1.0
       aspect_label: "1:1"
@@ -136,7 +136,7 @@ scenarios:
     name: "High-quality default when scene metadata is unclear"
     conditions:
       scene_type: unknown
-      face_visible: yes
+      face_visible: "yes"
       photo_quality: [8, 9, 10]
     crop:
       aspect_ratio: 0.8

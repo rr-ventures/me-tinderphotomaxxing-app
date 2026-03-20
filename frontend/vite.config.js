@@ -1,5 +1,10 @@
+import dns from 'node:dns'
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
+
+// Avoid IPv4/IPv6 "localhost" ordering surprises (Docker / WSL / dev containers).
+// See: https://vite.dev/config/server-options.html#server-host
+dns.setDefaultResultOrder('verbatim')
 
 // https://vite.dev/config/
 //
@@ -14,15 +19,30 @@ import react from '@vitejs/plugin-react'
 export default defineConfig({
   plugins: [react()],
   server: {
+    // Listen on all interfaces so Dev Container port forwarding can reach the server.
+    host: '0.0.0.0',
     port: 3000,
-    host: true,
+    strictPort: true,
+    // Vite 7 blocks unknown Host headers by default; forwarded URLs (Codespaces, proxies)
+    // use hostnames that are not "localhost", which can cause ERR_EMPTY_RESPONSE.
+    // This project is local/dev only — do not copy to public-facing deployments.
+    allowedHosts: true,
+    watch: {
+      // Reliable file events when the workspace is on Docker Desktop / WSL mounts
+      usePolling: true,
+      interval: 1000,
+    },
+    hmr: {
+      // Keep HMR on the same port as the page when using simple port forwards
+      clientPort: 3000,
+    },
     proxy: {
       '/api': {
-        target: 'http://localhost:8000',
+        target: 'http://127.0.0.1:8000',
         changeOrigin: true,
       },
       '/thumbnails': {
-        target: 'http://localhost:8000',
+        target: 'http://127.0.0.1:8000',
         changeOrigin: true,
       },
     },

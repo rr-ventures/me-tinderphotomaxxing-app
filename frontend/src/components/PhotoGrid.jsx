@@ -1,23 +1,33 @@
-import { useState } from 'react'
+import { useState, useMemo, useCallback, useEffect } from 'react'
 import PhotoCard from './PhotoCard'
 
 const PHOTOS_PER_PAGE = 48
 
-function PhotoGrid({ photos, results, onPhotoClick, selectable, selectedIds, onSelect, savedIds, shortlistIds, onShortlist }) {
+function PhotoGrid({ photos, results, onPhotoClick, selectable, selectedIds, onSelect, savedIds, shortlistIds, onShortlist, archivedIds, onArchive }) {
   const [page, setPage] = useState(0)
+
+  // Reset to page 0 whenever the photos list changes (filter applied, archive, etc.)
+  useEffect(() => {
+    setPage(0)
+  }, [photos])
+
+  const resultMap = useMemo(() => {
+    const map = {}
+    if (results) results.forEach(r => { map[r.filename] = r })
+    return map
+  }, [results])
+
+  const totalPages = Math.ceil((photos?.length ?? 0) / PHOTOS_PER_PAGE)
+  const startIdx = page * PHOTOS_PER_PAGE
+  const visiblePhotos = photos ? photos.slice(startIdx, startIdx + PHOTOS_PER_PAGE) : []
+
+  // Stable click handler — avoids creating a new function per card per render
+  const handleCardClick = useCallback((photo) => {
+    if (onPhotoClick) onPhotoClick(photo, resultMap[photo.filename])
+  }, [onPhotoClick, resultMap])
 
   if (!photos || photos.length === 0) {
     return <div className="empty-state">No photos found</div>
-  }
-
-  const totalPages = Math.ceil(photos.length / PHOTOS_PER_PAGE)
-  const startIdx = page * PHOTOS_PER_PAGE
-  const visiblePhotos = photos.slice(startIdx, startIdx + PHOTOS_PER_PAGE)
-
-  // Key by filename so results match photos regardless of ID changes across environments/restarts
-  const resultMap = {}
-  if (results) {
-    results.forEach(r => { resultMap[r.filename] = r })
   }
 
   return (
@@ -53,13 +63,15 @@ function PhotoGrid({ photos, results, onPhotoClick, selectable, selectedIds, onS
             key={photo.id}
             photo={photo}
             result={resultMap[photo.filename]}
-            onClick={() => onPhotoClick && onPhotoClick(photo, resultMap[photo.filename])}
+            onClick={() => handleCardClick(photo)}
             selectable={selectable}
             selected={selectedIds?.has(photo.id)}
             onSelect={onSelect}
             isSaved={savedIds?.has(photo.id)}
             isShortlisted={shortlistIds?.has(photo.id)}
             onShortlist={onShortlist}
+            isArchived={archivedIds?.has(photo.id)}
+            onArchive={onArchive}
           />
         ))}
       </div>

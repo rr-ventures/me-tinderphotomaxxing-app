@@ -10,32 +10,55 @@ import {
   rotatePhotoManual,
 } from '../api/client'
 
-const UPSCALE_STEPS = [
-  { at: 0, text: 'Preparing image...' },
-  { at: 1500, text: 'Sending to Gemini AI...' },
-  { at: 4000, text: 'AI is enhancing your photo...' },
-  { at: 9000, text: 'Rendering enhanced result...' },
-  { at: 16000, text: 'Almost done — finalizing...' },
-]
+function revokeObjectUrlSafe(url) {
+  if (url && String(url).startsWith('blob:')) {
+    try {
+      URL.revokeObjectURL(url)
+    } catch {
+      /* ignore */
+    }
+  }
+}
 
 const PROMPTS = {
+  hd_restore:
+    'This is a low-quality video frame or screenshot with compression blocking, motion blur, ' +
+    'pixelation, or low bitrate artefacts. Your ONLY task is pure technical AI super-resolution ' +
+    'restoration — no creative changes whatsoever.\n\n' +
+    'WHAT TO DO:\n' +
+    '- AI super-resolution: reconstruct missing high-frequency detail lost to video compression or downsampling\n' +
+    '- Remove JPEG/video blocking artefacts: eliminate the blocky 8×8 pixel grid from DCT video codecs (H.264, H.265)\n' +
+    '- Remove motion blur and temporal smearing from low frame rate or video encoding\n' +
+    '- Remove interlacing lines or comb artefacts if present\n' +
+    '- Reconstruct sharp edges, crisp detail, defined features — whatever was lost to compression\n' +
+    '- Output should look like the same frame from a high-bitrate 4K source\n\n' +
+    'FORBIDDEN — change absolutely nothing else:\n' +
+    '- No colour changes, no tone adjustments, no brightness or contrast changes\n' +
+    '- No face changes, no beauty filters, no skin smoothing\n' +
+    '- No background blur, no vignette, no photographic effects\n' +
+    '- No invented detail — only reconstruct what was genuinely there but lost',
   clarity:
-    'Increase the resolution and sharpness of this photo. ' +
-    'Focus only on improving pixel clarity, reducing blur and noise, ' +
-    'and adding fine detail. Do NOT change the lighting, colors, contrast, ' +
-    'mood, or style in any way. The result should look identical to the ' +
-    'original but with higher resolution and sharper detail.',
+    'Sharpen and clarify this photo so it looks like it was taken with a higher-quality camera — ' +
+    'without any detectable AI processing.\n\n' +
+    'WHAT TO DO:\n' +
+    '- Apply deconvolution-style sharpening to recover edge definition and micro-detail lost to lens softness or camera shake\n' +
+    '- Reduce digital noise and compression artifacts while preserving genuine film-like texture\n' +
+    '- Increase perceived resolution — the photo should look like it was shot on a Sony A7 IV or Canon R5 at f/2.8, ISO 100\n' +
+    '- Recover fine detail: individual hair strands, fabric weave, skin pores, eyelashes, background texture\n' +
+    '- Improve local contrast and micro-contrast so edges appear crisply defined\n' +
+    '- Preserve the exact same colours, white balance, exposure, and mood\n\n' +
+    'FORBIDDEN: No AI smoothing, no face changes, no background changes, no colour grading, no halos.',
   enhance:
-    'Enhance this portrait photo to professional quality. Preserve 100% of the original ' +
-    'identity — face structure, expression, pose, clothing, and background must remain ' +
-    'unchanged. Recover fine detail: sharp facial features, natural skin texture with ' +
-    'visible pores, realistic hair strands, and clean edges. Apply balanced cinematic ' +
-    'lighting with improved dynamic range — lift shadows slightly, recover highlights, ' +
-    'without relighting or reshaping. Remove compression artifacts and digital noise. ' +
-    'Apply controlled sharpening. Do NOT smooth skin artificially, do NOT alter facial ' +
-    'anatomy, do NOT change colors dramatically. Output should read as a true-to-life ' +
-    'photorealistic enhancement — the same photo, only clearer, sharper, and higher ' +
-    'resolution.',
+    'Elevate this photo to the standard of a high-end professional shoot — naturally and ' +
+    'undetectably, as if a skilled photographer had captured it under ideal conditions.\n\n' +
+    'WHAT TO DO:\n' +
+    '- Simulate the look of a Sony A1 + 85mm f/1.4 at ISO 100: tack-sharp subject, premium colour rendition, cinematic depth\n' +
+    '- Sharpen the subject: hair detail, skin texture (visible pores, not plastic), eye catchlights, fabric texture\n' +
+    '- Improve dynamic range: lift blocked shadows, gently recover blown highlights — subtle, like skilled dodge-and-burn\n' +
+    '- Refine lighting: soft natural directionality, warm highlights, slightly cooler shadows — as if shot with open sky or large softbox\n' +
+    '- Apply a clean editorial colour grade: lift midtones slightly, gentle warmth to skin, subtly desaturate distracting background colours\n' +
+    '- Remove sensor noise and compression artefacts, replace with subtle natural micro-texture\n\n' +
+    'FORBIDDEN: No beauty filters, no face reshaping, no skin smoothing, no dramatic background blur, no HDR tonemapping.',
 }
 
 const PRESET_FILTERS = {
@@ -43,7 +66,7 @@ const PRESET_FILTERS = {
   'Adaptive: Subject > Light': 'brightness(1.2) contrast(0.92) saturate(1.05)',
   'Adaptive: Subject > Vibrant': 'saturate(1.4) contrast(1.08) brightness(1.03)',
   'Adaptive: Subject > Warm Light': 'brightness(1.12) saturate(1.12) sepia(0.14) contrast(0.98)',
-  'Adaptive: Subject > Pop': 'brightness(1.1) contrast(1.18) saturate(1.1)',
+  'Adaptive: Subject > Pop': 'brightness(1.04) contrast(1.08) saturate(1.03)',
   'Adaptive: Subject > Balance Contrast': 'brightness(1.02) contrast(1.12) saturate(1.0)',
   'Adaptive: Portrait > Polished Portrait': 'brightness(1.04) contrast(1.04) saturate(1.04)',
   'Adaptive: Portrait > Enhance Portrait': 'brightness(1.1) contrast(1.1) saturate(1.08) hue-rotate(2deg)',
@@ -63,12 +86,13 @@ function getFilterForPreset(presetName) {
   if (lower.includes('warm')) return 'brightness(1.08) saturate(1.15) sepia(0.12)'
   if (lower.includes('cinematic') || lower.includes('moody')) return 'brightness(0.95) contrast(1.2) saturate(0.85)'
   if (lower.includes('b&w') || lower.includes('black')) return 'grayscale(1) contrast(1.15)'
-  if (lower.includes('vibrant') || lower.includes('pop')) return 'brightness(1.05) contrast(1.12) saturate(1.25)'
+  if (lower.includes('vibrant')) return 'brightness(1.03) contrast(1.08) saturate(1.12)'
+  if (lower.includes('pop')) return 'brightness(1.04) contrast(1.08) saturate(1.03)'
   if (lower.includes('light') || lower.includes('bright')) return 'brightness(1.12) contrast(0.95)'
   return 'brightness(1.05) contrast(1.05) saturate(1.08)'
 }
 
-function PhotoDetail({ photo, result, runId, onClose, onPrev, onNext }) {
+function PhotoDetail({ photo, result, runId, onClose, onPrev, onNext, isShortlisted, onShortlist, isArchived, onArchive }) {
   const [previewSrc, setPreviewSrc] = useState(null)
   const [rotating, setRotating] = useState(false)
   const [rotationKey, setRotationKey] = useState(0)
@@ -91,15 +115,19 @@ function PhotoDetail({ photo, result, runId, onClose, onPrev, onNext }) {
   const [upscaleApplied, setUpscaleApplied] = useState(false)
   const [upscaleLoading, setUpscaleLoading] = useState(false)
   const [upscaleSrc, setUpscaleSrc] = useState(null)
-  const [upscaleMode, setUpscaleMode] = useState('enhance')
   const [upscaleStep, setUpscaleStep] = useState('')
-  const stepTimers = useRef([])
+  const [upscaleProgressPct, setUpscaleProgressPct] = useState(null)
+  const monotonicRef = useRef(null)
 
-  // Clean up step timers when the modal unmounts
-  useEffect(() => {
-    return () => {
-      stepTimers.current.forEach(t => clearTimeout(t))
+  function clearMonotonic() {
+    if (monotonicRef.current != null) {
+      clearInterval(monotonicRef.current)
+      monotonicRef.current = null
     }
+  }
+
+  useEffect(() => {
+    return () => clearMonotonic()
   }, [])
 
   // Keyboard navigation: Escape closes, arrows navigate prev/next
@@ -113,11 +141,14 @@ function PhotoDetail({ photo, result, runId, onClose, onPrev, onNext }) {
     return () => window.removeEventListener('keydown', handleKey)
   }, [onClose, onPrev, onNext])
 
-  // Compare mode: 'original' | 'clarity' | 'enhance'
-  const [viewMode, setViewMode] = useState('enhance')
+  // Compare: 'original' | 'hd_restore' | 'clarity' | 'enhance'
+  const [viewMode, setViewMode] = useState('original')
   const [claritySrc, setClaritySrc] = useState(null)
   const [enhanceSrc, setEnhanceSrc] = useState(null)
   const [selectedUpscaleForSave, setSelectedUpscaleForSave] = useState(null)
+
+  const aiBlobsRef = useRef({ hd: null, clarity: null, enhance: null })
+  aiBlobsRef.current = { hd: upscaleSrc, clarity: claritySrc, enhance: enhanceSrc }
 
   const [presetPreviewFilter, setPresetPreviewFilter] = useState(null)
   const [blurPreviewSrc, setBlurPreviewSrc] = useState(null)
@@ -127,6 +158,25 @@ function PhotoDetail({ photo, result, runId, onClose, onPrev, onNext }) {
   const [filename, setFilename] = useState('')
   const [saving, setSaving] = useState(false)
   const [status, setStatus] = useState(null)
+
+  // New photo → reset AI UI; cleanup revokes latest blob URLs via ref (avoids stale closures).
+  useEffect(() => {
+    setUpscaleApplied(false)
+    setUpscaleSrc(null)
+    setClaritySrc(null)
+    setEnhanceSrc(null)
+    setViewMode('original')
+    setSelectedUpscaleForSave(null)
+    setUpscaleProgressPct(null)
+    setUpscaleStep('')
+    clearMonotonic()
+    return () => {
+      const { hd, clarity, enhance } = aiBlobsRef.current
+      revokeObjectUrlSafe(hd)
+      revokeObjectUrlSafe(clarity)
+      revokeObjectUrlSafe(enhance)
+    }
+  }, [photo.id])
 
   useEffect(() => {
     if (!result) {
@@ -158,8 +208,22 @@ function PhotoDetail({ photo, result, runId, onClose, onPrev, onNext }) {
   }, [photo?.id, runId])
 
   const refreshPreview = useCallback(async (cropVal, adjVal) => {
+    // Crop / style changed → AI previews are no longer valid; clear without forcing user to “revert” manually.
+    setUpscaleSrc((u) => {
+      revokeObjectUrlSafe(u)
+      return null
+    })
+    setClaritySrc((u) => {
+      revokeObjectUrlSafe(u)
+      return null
+    })
+    setEnhanceSrc((u) => {
+      revokeObjectUrlSafe(u)
+      return null
+    })
     setUpscaleApplied(false)
-    setUpscaleSrc(null)
+    setViewMode('original')
+    setSelectedUpscaleForSave(null)
     const hasCrop = cropVal && !(cropVal.x === 0 && cropVal.y === 0 && cropVal.w === 100 && cropVal.h === 100)
     if (!hasCrop && !adjVal) { setPreviewSrc(null); return }
     try {
@@ -207,105 +271,140 @@ function PhotoDetail({ photo, result, runId, onClose, onPrev, onNext }) {
     setStatus(null)
   }
 
-  async function applyCompareBoth() {
+  async function tryAiEnhancementOptions() {
     setUpscaleLoading(true)
-    setUpscaleStep('Running Clarity and Enhance in parallel...')
+    setUpscaleProgressPct(0)
+    setUpscaleStep('Starting HD Restore, Sharpen & Clarify, and Pro Edit…')
     setStatus(null)
+    setUpscaleApplied(false)
+    revokeObjectUrlSafe(upscaleSrc)
+    revokeObjectUrlSafe(claritySrc)
+    revokeObjectUrlSafe(enhanceSrc)
     setUpscaleSrc(null)
     setClaritySrc(null)
     setEnhanceSrc(null)
-
-    stepTimers.current.forEach(t => clearTimeout(t))
-    stepTimers.current = UPSCALE_STEPS.slice(1).map(step =>
-      setTimeout(() => setUpscaleStep(step.text), step.at)
-    )
+    clearMonotonic()
 
     const hasCrop = appliedCrop && !(appliedCrop.x === 0 && appliedCrop.y === 0 && appliedCrop.w === 100 && appliedCrop.h === 100)
     const opts = { crop: hasCrop ? appliedCrop : null, adjustments: appliedAdjustments }
 
+    const slot = { hd_restore: 0, clarity: 0, enhance: 0 }
+    const label = (k, p) => (p >= 100 ? `${k} ✓` : `${k}…`)
+    const bump = () => {
+      const avg = (slot.hd_restore + slot.clarity + slot.enhance) / 3
+      const r = Math.round(avg)
+      setUpscaleProgressPct(r)
+      setUpscaleStep(
+        `${r}% · ${label('HD', slot.hd_restore)} · ${label('Sharpen', slot.clarity)} · ${label('Pro Edit', slot.enhance)}`,
+      )
+    }
+
     try {
-      const [clarityUrl, enhanceUrl] = await Promise.all([
-        upscalePreviewUrl(photo.id, { ...opts, mode: 'clarity' }),
-        upscalePreviewUrl(photo.id, { ...opts, mode: 'enhance' }),
+      const [hdUrl, clarityUrl, enhanceUrl] = await Promise.all([
+        upscalePreviewUrl(photo.id, {
+          ...opts,
+          mode: 'hd_restore',
+          onProgress: (p) => {
+            slot.hd_restore = p
+            bump()
+          },
+        }),
+        upscalePreviewUrl(photo.id, {
+          ...opts,
+          mode: 'clarity',
+          onProgress: (p) => {
+            slot.clarity = p
+            bump()
+          },
+        }),
+        upscalePreviewUrl(photo.id, {
+          ...opts,
+          mode: 'enhance',
+          onProgress: (p) => {
+            slot.enhance = p
+            bump()
+          },
+        }),
       ])
+      setUpscaleSrc(hdUrl)
       setClaritySrc(clarityUrl)
       setEnhanceSrc(enhanceUrl)
       setUpscaleApplied(true)
-      setViewMode('enhance')
+      setViewMode('original')
       setSelectedUpscaleForSave('enhance')
+      setUpscaleProgressPct(100)
+      setUpscaleStep('100% · All three ready')
       setStatus({
         type: 'success',
-        message: 'Both modes ready — click Original / Clarity / Full Enhance to compare.',
+        message:
+          'All three AI versions are ready. Use the four tabs above the photo to switch instantly (no extra API calls). Save uses the AI tab you select last — default is Professional Edit.',
       })
     } catch (err) {
-      setStatus({ type: 'error', message: `Compare failed: ${err.message}` })
+      setStatus({ type: 'error', message: `AI enhancement failed: ${err.message}` })
     } finally {
-      stepTimers.current.forEach(t => clearTimeout(t))
-      stepTimers.current = []
+      clearMonotonic()
       setUpscaleLoading(false)
+      setUpscaleProgressPct(null)
       setUpscaleStep('')
     }
   }
 
-  async function applyUpscale() {
-    setUpscaleLoading(true)
-    setUpscaleStep(UPSCALE_STEPS[0].text)
-    setStatus(null)
-    setClaritySrc(null)
-    setEnhanceSrc(null)
-
-    stepTimers.current.forEach(t => clearTimeout(t))
-    stepTimers.current = UPSCALE_STEPS.slice(1).map(step =>
-      setTimeout(() => setUpscaleStep(step.text), step.at)
-    )
-
-    try {
-      const hasCrop = appliedCrop && !(appliedCrop.x === 0 && appliedCrop.y === 0 && appliedCrop.w === 100 && appliedCrop.h === 100)
-      const url = await upscalePreviewUrl(photo.id, {
-        crop: hasCrop ? appliedCrop : null,
-        adjustments: appliedAdjustments,
-        mode: upscaleMode,
-      })
-      setUpscaleSrc(url)
-      setUpscaleApplied(true)
-      setViewMode(upscaleMode)
-      setSelectedUpscaleForSave(upscaleMode)
-      setStatus({
-        type: 'success',
-        message: `Enhancement applied (${upscaleMode === 'clarity' ? 'Clarity Only' : 'Full Enhance'}).`,
-      })
-    } catch (err) {
-      setStatus({ type: 'error', message: `Enhancement failed: ${err.message}` })
-    } finally {
-      stepTimers.current.forEach(t => clearTimeout(t))
-      stepTimers.current = []
-      setUpscaleLoading(false)
-      setUpscaleStep('')
-    }
-  }
-
-  function revertUpscale() {
+  function clearAiPreviews() {
+    revokeObjectUrlSafe(upscaleSrc)
+    revokeObjectUrlSafe(claritySrc)
+    revokeObjectUrlSafe(enhanceSrc)
     setUpscaleApplied(false)
     setUpscaleSrc(null)
     setClaritySrc(null)
     setEnhanceSrc(null)
-    setViewMode('enhance')
+    setViewMode('original')
     setSelectedUpscaleForSave(null)
     setStatus(null)
+    clearMonotonic()
+    setUpscaleProgressPct(null)
+    setUpscaleStep('')
+  }
+
+  async function handleSave() {
+    setSaving(true)
+    setStatus(null)
+    try {
+      const hasCrop = appliedCrop && !(appliedCrop.x === 0 && appliedCrop.y === 0 && appliedCrop.w === 100 && appliedCrop.h === 100)
+      const aiMode =
+        selectedUpscaleForSave ||
+        (viewMode !== 'original' ? viewMode : null) ||
+        'enhance'
+      const modeToSave = upscaleApplied ? aiMode : null
+      const res = await processPhoto(photo.id, {
+        rotate: true,
+        crop: hasCrop ? appliedCrop : null,
+        adjustments: appliedAdjustments,
+        upscale: upscaleApplied,
+        upscale_mode: modeToSave,
+        output_filename: filename || null,
+      })
+      setStatus({ type: 'success', message: `Saved as ${res.filename}` })
+    } catch (err) {
+      setStatus({ type: 'error', message: err.message })
+    } finally {
+      setSaving(false)
+    }
   }
 
   // Pick the right image source for the main view
   function _getMainSrc() {
-    if (!upscaleApplied) return previewSrc || originalSrc
-    if (viewMode === 'original') return previewSrc || originalSrc
-    if (viewMode === 'clarity') return claritySrc || upscaleSrc || previewSrc || originalSrc
-    if (viewMode === 'enhance') return enhanceSrc || upscaleSrc || previewSrc || originalSrc
-    return previewSrc || originalSrc
+    const base = previewSrc || originalSrc
+    if (!upscaleApplied) return base
+    if (viewMode === 'original') return base
+    if (viewMode === 'hd_restore') return upscaleSrc || base
+    if (viewMode === 'clarity') return claritySrc || base
+    if (viewMode === 'enhance') return enhanceSrc || base
+    return base
   }
 
   const mainSrc = _getMainSrc()
   const hasEdits = !!appliedCrop || !!appliedAdjustments || upscaleApplied
-  const hasBothModes = !!(claritySrc && enhanceSrc)
+  const aiOptionsReady = !!(claritySrc && enhanceSrc && upscaleSrc)
 
   if (!result) {
     return (
@@ -317,7 +416,27 @@ function PhotoDetail({ photo, result, runId, onClose, onPrev, onNext }) {
             {onNext && <button className="detail-nav-btn" onClick={onNext} title="Next photo (→)">→</button>}
           </div>
           <h2>{photo.filename}</h2>
-          <button className="close-btn" onClick={onClose}>✕</button>
+          <div className="detail-header-actions">
+            {onShortlist && (
+              <button
+                className={`detail-shortlist-btn ${isShortlisted ? 'detail-shortlist-btn-active' : ''}`}
+                onClick={e => { e.stopPropagation(); onShortlist(photo.id) }}
+                title={isShortlisted ? 'Remove from shortlist' : 'Add to shortlist'}
+              >
+                ★ {isShortlisted ? 'Shortlisted' : 'Shortlist'}
+              </button>
+            )}
+            {onArchive && (
+              <button
+                className={`detail-archive-btn ${isArchived ? 'detail-archive-btn-active' : ''}`}
+                onClick={e => { e.stopPropagation(); onArchive(photo.id) }}
+                title={isArchived ? 'Restore from archive' : 'Archive (hide from Photos)'}
+              >
+                {isArchived ? '↩ Restore' : '⊘ Archive'}
+              </button>
+            )}
+            <button className="close-btn" onClick={onClose}>✕</button>
+          </div>
         </div>
         <p className="muted">No analysis results yet. Run analysis from the Dashboard.</p>
           <img src={originalSrc} alt={photo.filename} style={{ width: '100%', borderRadius: 8, marginTop: 16 }} />
@@ -335,7 +454,27 @@ function PhotoDetail({ photo, result, runId, onClose, onPrev, onNext }) {
             {onNext && <button className="detail-nav-btn" onClick={onNext} title="Next photo (→)">→</button>}
           </div>
           <h2 className="detail-title">{photo.filename}</h2>
-          <button className="close-btn" onClick={onClose}>✕</button>
+          <div className="detail-header-actions">
+            {onShortlist && (
+              <button
+                className={`detail-shortlist-btn ${isShortlisted ? 'detail-shortlist-btn-active' : ''}`}
+                onClick={e => { e.stopPropagation(); onShortlist(photo.id) }}
+                title={isShortlisted ? 'Remove from shortlist' : 'Add to shortlist'}
+              >
+                ★ {isShortlisted ? 'Shortlisted' : 'Shortlist'}
+              </button>
+            )}
+            {onArchive && (
+              <button
+                className={`detail-archive-btn ${isArchived ? 'detail-archive-btn-active' : ''}`}
+                onClick={e => { e.stopPropagation(); onArchive(photo.id) }}
+                title={isArchived ? 'Restore from archive' : 'Archive (hide from Photos)'}
+              >
+                {isArchived ? '↩ Restore' : '⊘ Archive'}
+              </button>
+            )}
+            <button className="close-btn" onClick={onClose}>✕</button>
+          </div>
         </div>
 
         <div className="detail-body">
@@ -360,42 +499,53 @@ function PhotoDetail({ photo, result, runId, onClose, onPrev, onNext }) {
             )}
 
             <div className="photo-controls-bar">
-              {/* View mode toggle buttons — shown when upscale has been applied */}
-              {upscaleApplied && !cropMode && (
-                <div className="view-mode-bar">
+              {/* Four-way compare: original + three cached AI results (no API calls when switching) */}
+              {aiOptionsReady && !cropMode && (
+                <div className="view-mode-bar view-mode-bar-ai">
                   <button
+                    type="button"
                     className={`view-mode-btn ${viewMode === 'original' ? 'view-mode-btn-active' : ''}`}
                     onClick={() => setViewMode('original')}
+                    title="Without AI enhancement. Crop and style sliders still apply if you used them."
                   >
-                    Original
+                    Original <span className="view-mode-sub">(no AI)</span>
                   </button>
-                  {/* Only show Clarity button if clarity result exists, or single-mode was clarity */}
-                  {(claritySrc || (upscaleSrc && selectedUpscaleForSave === 'clarity')) && (
-                    <button
-                      className={`view-mode-btn ${viewMode === 'clarity' ? 'view-mode-btn-active' : ''}`}
-                      onClick={() => {
-                        setViewMode('clarity')
-                        setSelectedUpscaleForSave('clarity')
-                      }}
-                    >
-                      Clarity
-                    </button>
-                  )}
-                  {/* Only show Full Enhance button if enhance result exists, or single-mode was enhance */}
-                  {(enhanceSrc || (upscaleSrc && selectedUpscaleForSave === 'enhance')) && (
-                    <button
-                      className={`view-mode-btn ${viewMode === 'enhance' ? 'view-mode-btn-active' : ''}`}
-                      onClick={() => {
-                        setViewMode('enhance')
-                        setSelectedUpscaleForSave('enhance')
-                      }}
-                    >
-                      Full Enhance
-                    </button>
-                  )}
-                  {hasBothModes && (
-                    <span className="view-mode-hint">Click to compare — selected version will be saved</span>
-                  )}
+                  <button
+                    type="button"
+                    className={`view-mode-btn ${viewMode === 'hd_restore' ? 'view-mode-btn-active' : ''}`}
+                    onClick={() => {
+                      setViewMode('hd_restore')
+                      setSelectedUpscaleForSave('hd_restore')
+                    }}
+                    title="HD Restore — super-resolution for low-res or compressed sources"
+                  >
+                    HD Restore
+                  </button>
+                  <button
+                    type="button"
+                    className={`view-mode-btn ${viewMode === 'clarity' ? 'view-mode-btn-active' : ''}`}
+                    onClick={() => {
+                      setViewMode('clarity')
+                      setSelectedUpscaleForSave('clarity')
+                    }}
+                    title="Sharpen and clarify — no colour or lighting change"
+                  >
+                    Sharpen &amp; Clarify
+                  </button>
+                  <button
+                    type="button"
+                    className={`view-mode-btn ${viewMode === 'enhance' ? 'view-mode-btn-active' : ''}`}
+                    onClick={() => {
+                      setViewMode('enhance')
+                      setSelectedUpscaleForSave('enhance')
+                    }}
+                    title="Professional edit — full retouch (default for Save)"
+                  >
+                    Professional Edit
+                  </button>
+                  <span className="view-mode-hint">
+                    Switch tabs to compare — no new requests. <strong>Save</strong> uses the AI mode on the selected tab (default: Professional Edit).
+                  </span>
                 </div>
               )}
 
@@ -404,7 +554,7 @@ function PhotoDetail({ photo, result, runId, onClose, onPrev, onNext }) {
                   {[
                     appliedCrop && 'Cropped',
                     appliedAdjustments && 'Styled',
-                    upscaleApplied && (viewMode === 'original' ? 'Viewing Original' : viewMode === 'clarity' ? 'Clarity' : 'Full Enhance'),
+                    upscaleApplied && (viewMode === 'original' ? 'Viewing Original' : viewMode === 'clarity' ? 'Sharpen & Clarify' : viewMode === 'hd_restore' ? 'HD Restore' : 'Professional Edit'),
                   ].filter(Boolean).join(' + ')}
                 </div>
               )}
@@ -526,7 +676,7 @@ function PhotoDetail({ photo, result, runId, onClose, onPrev, onNext }) {
                     <div className="preset-proof-content">
                       <p><strong>Evidence &amp; Avoid are from real Lightroom presets.</strong> The &quot;Why&quot; and &quot;Avoid&quot; text comes from our research-backed preset library (<code>production_preset_recommendations.yml</code>), which maps photo metadata (lighting, scene, face visibility) to Adobe Lightroom Adaptive presets.</p>
                       <p><strong>CSS filters are approximations.</strong> Lightroom uses AI masking and per-pixel adjustments. Our preview uses CSS filters (brightness, contrast, saturation, etc.) to approximate the visual effect. It gives you a rough idea — the actual preset in Lightroom will look more refined.</p>
-                      <p><strong>The recommendation is accurate.</strong> The preset name, path, evidence, and avoid guidance are based on dating-photo research (Photofeeler, Hinge, OkCupid). The visual preview is our best CSS approximation of that preset&apos;s look.</p>
+                      <p><strong>Recommendations follow your analysis metadata</strong> (scene, lighting, quality, colors). If metadata is off, try re-analysing the photo. The visual preview is a deliberately mild CSS hint — real Lightroom Adaptive presets use local adjustments and often look less heavy than a global filter.</p>
                     </div>
                   </details>
                 </>
@@ -667,95 +817,75 @@ function PhotoDetail({ photo, result, runId, onClose, onPrev, onNext }) {
               <div className="edit-section-header">
                 <h3>AI Enhancement</h3>
                 <div className="edit-section-actions">
-                  {!upscaleApplied && !upscaleLoading && (
-                    <>
-                      <button className="btn btn-small btn-primary" onClick={applyUpscale}>
-                        Apply {upscaleMode === 'clarity' ? 'Clarity' : 'Enhance'}
-                      </button>
-                      <button className="btn btn-small btn-accent" onClick={applyCompareBoth}>
-                        Compare Both
-                      </button>
-                    </>
+                  {!aiOptionsReady && !upscaleLoading && (
+                    <button type="button" className="btn btn-small btn-primary" onClick={tryAiEnhancementOptions}>
+                      Try AI options
+                    </button>
                   )}
-                  {upscaleApplied && (
+                  {aiOptionsReady && !upscaleLoading && (
                     <>
-                      <span className="edit-applied-tag">
-                        {hasBothModes ? 'Compare mode' : 'Applied'}
-                      </span>
-                      <button className="btn btn-small btn-danger" onClick={revertUpscale}>Revert</button>
+                      <span className="edit-applied-tag">3 AI previews ready</span>
+                      <button type="button" className="btn btn-small btn-secondary" onClick={tryAiEnhancementOptions}>
+                        Regenerate all
+                      </button>
+                      <button type="button" className="btn btn-small btn-danger" onClick={clearAiPreviews}>
+                        Clear AI previews
+                      </button>
                     </>
                   )}
                 </div>
               </div>
 
-              {!upscaleApplied && (
-                <div className="upscale-modes">
-                  <button
-                    className={`upscale-mode-btn ${upscaleMode === 'clarity' ? 'active' : ''}`}
-                    onClick={() => setUpscaleMode('clarity')}
-                    disabled={upscaleLoading}
-                  >
-                    <strong>Clarity Only</strong>
-                    <span>Resolution + sharpness only. No lighting or color changes.</span>
-                  </button>
-                  <button
-                    className={`upscale-mode-btn ${upscaleMode === 'enhance' ? 'active' : ''}`}
-                    onClick={() => setUpscaleMode('enhance')}
-                    disabled={upscaleLoading}
-                  >
-                    <strong>Full Enhance</strong>
-                    <span>Resolution + AI lighting, color, and quality improvements.</span>
-                  </button>
-                </div>
+              {!aiOptionsReady && !upscaleLoading && (
+                <details className="upscale-details" style={{ marginTop: 8 }}>
+                  <summary>What the three AI options do</summary>
+                  <ul className="upscale-option-list muted" style={{ fontSize: '0.82rem', margin: '8px 0 0', paddingLeft: '1.2rem' }}>
+                    <li><strong>HD Restore</strong> — super-resolution for screenshots, video frames, and heavy compression. No creative changes.</li>
+                    <li><strong>Sharpen &amp; Clarify</strong> — sharper detail and less blur/noise; no colour or lighting shifts.</li>
+                    <li><strong>Professional Edit</strong> — full retouch: range, light, subtle grade; still identity-safe.</li>
+                  </ul>
+                </details>
               )}
 
               <p className="muted" style={{ fontSize: '0.8rem', marginTop: 6 }}>
                 {photo.needs_upscale
                   ? `Short side is ${photo.short_side}px — enhancement recommended (min 1080px for dating apps).`
-                  : `Resolution OK (${photo.width}x${photo.height}). Apply for extra sharpness and quality.`}
+                  : `Resolution OK (${photo.width}x${photo.height}). Try AI options for extra sharpness and polish.`}
               </p>
 
-              {upscaleLoading && (
+              {upscaleLoading && upscaleProgressPct != null && (
                 <div className="upscale-progress">
                   <div className="upscale-progress-bar">
-                    <div className="upscale-progress-fill" />
+                    <div
+                      className="upscale-progress-fill upscale-progress-fill-determinate"
+                      style={{ width: `${upscaleProgressPct}%` }}
+                    />
                   </div>
                   <div className="upscale-step-info">
                     <div className="upscale-spinner" />
-                    <span>{upscaleStep}</span>
+                    <span className="upscale-step-text">{upscaleStep || `${upscaleProgressPct}%`}</span>
                   </div>
                   <div className="upscale-technical">
-                    <span>Model: <code>Gemini Flash Image</code></span>
-                    <span>Mode: <code>{upscaleMode === 'clarity' ? 'Clarity Only' : 'Full Enhance'}</code></span>
+                    <span>Model: <code>Gemini 3.1 Flash Image</code></span>
+                    <span>Job: <code>HD + Sharpen &amp; Clarify + Professional Edit (parallel)</code></span>
                   </div>
                 </div>
               )}
 
-              {/* Show full prompt + details after applying */}
-              {upscaleApplied && !upscaleLoading && (
+              {aiOptionsReady && !upscaleLoading && (
                 <details className="upscale-details">
-                  <summary>What was applied</summary>
-                  <div className="upscale-technical">
-                    <span>Model: <code>Gemini Flash Image</code></span>
-                    <span>Mode: <code>{upscaleMode === 'clarity' ? 'Clarity Only' : 'Full Enhance'}</code></span>
+                  <summary>Prompts sent to Gemini (all three)</summary>
+                  <div className="upscale-technical" style={{ marginBottom: 10 }}>
+                    <span>Model: <code>Gemini 3.1 Flash Image</code></span>
                   </div>
-                  <div className="prompt-display">
-                    <div className="prompt-label">Prompt sent to Gemini:</div>
-                    <pre className="prompt-text">{PROMPTS[upscaleMode]}</pre>
-                  </div>
-                </details>
-              )}
-
-              {/* Always-visible prompt preview (collapsed) */}
-              {!upscaleApplied && !upscaleLoading && (
-                <details className="upscale-details">
-                  <summary>View prompt that will be sent</summary>
-                  <div className="prompt-display">
-                    <div className="prompt-label">
-                      {upscaleMode === 'clarity' ? 'Clarity Only' : 'Full Enhance'} prompt:
+                  {['hd_restore', 'clarity', 'enhance'].map((key) => (
+                    <div className="prompt-display" key={key} style={{ marginTop: 12 }}>
+                      <div className="prompt-label">
+                        {key === 'hd_restore' ? 'HD Restore' : key === 'clarity' ? 'Sharpen & Clarify' : 'Professional Edit'}:
+                      </div>
+                      <pre className="prompt-text">{PROMPTS[key]}</pre>
                     </div>
-                    <pre className="prompt-text">{PROMPTS[upscaleMode]}</pre>
-                  </div>
+                  ))}
                 </details>
               )}
             </div>
@@ -803,9 +933,11 @@ function PhotoDetail({ photo, result, runId, onClose, onPrev, onNext }) {
               </div>
 
               <button
+                type="button"
                 className="btn btn-primary btn-large save-btn"
                 onClick={handleSave}
-                disabled={saving}
+                disabled={saving || upscaleLoading}
+                title={upscaleLoading ? 'Wait for AI previews to finish' : undefined}
               >
                 {saving
                   ? 'Saving...'
@@ -830,28 +962,6 @@ function PhotoDetail({ photo, result, runId, onClose, onPrev, onNext }) {
       </div>
     </div>
   )
-
-  async function handleSave() {
-    setSaving(true)
-    setStatus(null)
-    try {
-      const hasCrop = appliedCrop && !(appliedCrop.x === 0 && appliedCrop.y === 0 && appliedCrop.w === 100 && appliedCrop.h === 100)
-      const modeToSave = upscaleApplied ? (selectedUpscaleForSave || viewMode || upscaleMode) : null
-      const res = await processPhoto(photo.id, {
-        rotate: true,
-        crop: hasCrop ? appliedCrop : null,
-        adjustments: appliedAdjustments,
-        upscale: upscaleApplied,
-        upscale_mode: modeToSave,
-        output_filename: filename || null,
-      })
-      setStatus({ type: 'success', message: `Saved as ${res.filename}` })
-    } catch (err) {
-      setStatus({ type: 'error', message: err.message })
-    } finally {
-      setSaving(false)
-    }
-  }
 }
 
 function MetaItem({ label, value }) {

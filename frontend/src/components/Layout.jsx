@@ -1,20 +1,24 @@
 import { useEffect, useState } from 'react'
 import { Outlet, Link, useLocation } from 'react-router-dom'
-import { getFolderCounts, getSaved, getShortlist } from '../api/client'
+import { getFolderCounts, getSaved, getShortlist, getArchivedIds } from '../api/client'
 
 function Layout() {
   const location = useLocation()
   const [analyzedCount, setAnalyzedCount] = useState(null)
   const [shortlistCount, setShortlistCount] = useState(null)
+  const [archivedCount, setArchivedCount] = useState(null)
   const [savedCount, setSavedCount] = useState(null)
 
   useEffect(() => {
     async function loadCounts() {
       try {
-        const [counts, saved, sl] = await Promise.all([getFolderCounts(), getSaved(), getShortlist()])
-        setAnalyzedCount(counts.analyzed ?? null)
+        const [counts, saved, sl, arch] = await Promise.all([getFolderCounts(), getSaved(), getShortlist(), getArchivedIds()])
+        // Match /photos merged list: scan includes to_process + analyzed (see list_photos without run_id).
+        const pipeline = (counts.to_process ?? 0) + (counts.analyzed ?? 0)
+        setAnalyzedCount(pipeline > 0 ? pipeline : null)
         setSavedCount((saved.photo_ids || []).length)
         setShortlistCount((sl.photo_ids || []).length)
+        setArchivedCount((arch.photo_ids || []).length)
       } catch { /* ignore */ }
     }
     loadCounts()
@@ -50,11 +54,20 @@ function Layout() {
               <span className="nav-badge nav-badge-shortlist">{shortlistCount}</span>
             )}
           </Link>
+          <Link to="/archived" className={`nav-link ${isActive('/archived') ? 'active' : ''}`}>
+            Archived
+            {archivedCount != null && archivedCount > 0 && (
+              <span className="nav-badge nav-badge-archived">{archivedCount}</span>
+            )}
+          </Link>
           <Link to="/saved" className={`nav-link ${isActive('/saved') ? 'active' : ''}`}>
             Saved
             {savedCount != null && savedCount > 0 && (
               <span className="nav-badge nav-badge-saved">{savedCount}</span>
             )}
+          </Link>
+          <Link to="/settings" className={`nav-link ${isActive('/settings') ? 'active' : ''}`}>
+            Settings
           </Link>
         </div>
       </nav>

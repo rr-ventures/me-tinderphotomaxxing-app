@@ -23,6 +23,7 @@ import Layout from './components/Layout'
 import Dashboard from './pages/Dashboard'
 import Photos from './pages/Photos'
 import Shortlist from './pages/Shortlist'
+import Archived from './pages/Archived'
 import Saved from './pages/Saved'
 import Analysis from './pages/Analysis'
 import Settings from './pages/Settings'
@@ -77,6 +78,7 @@ function App() {
           <Route path="/" element={<Dashboard />} />
           <Route path="/photos" element={<Photos />} />
           <Route path="/shortlist" element={<Shortlist />} />
+          <Route path="/archived" element={<Archived />} />
           <Route path="/saved" element={<Saved />} />
           <Route path="/analysis/:runId" element={<Analysis />} />
           <Route path="/settings" element={<Settings />} />
