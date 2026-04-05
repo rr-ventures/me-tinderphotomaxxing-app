@@ -1765,6 +1765,11 @@ details.runs-history[open] .runs-history-summary::before {
   color: #4ade80;
 }
 
+.alert-info {
+  background: #0a111c;
+  border: 1px solid #1e40af;
+}
+
 .alert-warning {
   background: #1c1a0a;
   border: 1px solid #854d0e;
@@ -3649,4 +3654,272 @@ details.runs-history[open] .runs-history-summary::before {
   padding: 10px 14px;
   border-radius: var(--radius);
   font-size: 0.85rem;
+}
+
+/* ── Bulk HD Upscale bar ─────────────────────────────────────────────── */
+.bulk-upscale-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 0 4px;
+  flex-wrap: wrap;
+}
+.bulk-upscale-hint {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+}
+.bulk-upscale-mini-bar {
+  flex: 1;
+  min-width: 120px;
+}
+
+/* ── Upscale progress panel ──────────────────────────────────────────── */
+.upscale-panel {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  margin-bottom: 12px;
+  overflow: hidden;
+}
+.upscale-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-secondary);
+}
+.upscale-panel-title {
+  font-weight: 600;
+  font-size: 0.9rem;
+}
+.upscale-confirm {
+  padding: 14px 16px;
+}
+.upscale-confirm p {
+  margin: 0 0 8px;
+  font-size: 0.9rem;
+}
+.upscale-confirm code {
+  background: var(--bg-hover);
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-size: 0.82rem;
+}
+.upscale-confirm-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 12px;
+}
+.upscale-progress {
+  padding: 12px 16px;
+}
+.upscale-progress-bar-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+.upscale-progress-bar {
+  flex: 1;
+  height: 6px;
+  background: var(--bg-hover);
+  border-radius: 3px;
+  overflow: hidden;
+}
+.upscale-progress-fill {
+  height: 100%;
+  background: var(--accent);
+  border-radius: 3px;
+  transition: width 0.4s ease;
+}
+.upscale-progress-label {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  white-space: nowrap;
+  min-width: 120px;
+}
+.upscale-log {
+  max-height: 200px;
+  overflow-y: auto;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 8px 10px;
+  font-family: monospace;
+  font-size: 0.78rem;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.upscale-log-line { color: var(--text-muted); }
+.upscale-log-line.log-ok { color: #4ade80; }
+.upscale-log-line.log-err { color: #f87171; }
+.upscale-log-line.log-info { color: var(--text-muted); }
+.upscale-done {
+  margin-top: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.upscale-done-summary {
+  font-size: 0.85rem;
+}
+.text-success { color: #4ade80; }
+.text-error { color: #f87171; }
+
+/* ── Preset Export Modal ─────────────────────────────────────────────── */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.7);
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  animation: overlayIn 0.15s ease;
+}
+
+.modal {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  width: 100%;
+  max-width: 760px;
+  max-height: 85vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 20px 24px 16px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.modal-header h2 {
+  margin: 0;
+  font-size: 1.1rem;
+}
+.modal-close {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  font-size: 1.1rem;
+  cursor: pointer;
+  padding: 4px 8px;
+  border-radius: var(--radius);
+  line-height: 1;
+}
+.modal-close:hover { background: var(--bg-hover); color: var(--text); }
+
+.preset-export-loading {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  padding: 40px;
+}
+.preset-export-intro {
+  padding: 12px 24px 0;
+  font-size: 0.85rem;
+  margin: 0;
+}
+.preset-export-actions {
+  padding: 12px 24px;
+  display: flex;
+  gap: 10px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.preset-export-list {
+  overflow-y: auto;
+  padding: 12px 24px 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.preset-export-photo {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 12px 14px;
+  background: var(--bg-card);
+}
+.preset-export-photo-header {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+.preset-export-filename {
+  font-weight: 600;
+  font-size: 0.9rem;
+  color: var(--text);
+}
+.preset-export-quality,
+.preset-export-style {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  background: var(--bg-hover);
+  padding: 2px 7px;
+  border-radius: 100px;
+}
+.preset-export-recs {
+  margin: 0;
+  padding-left: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.preset-export-rec {
+  font-size: 0.85rem;
+}
+.preset-name {
+  font-weight: 500;
+  color: var(--accent);
+}
+.preset-path {
+  font-size: 0.78rem;
+}
+/* ── Upscale Progress Bar + Log ──────────────────────────────────────────── */
+.upscale-progress-bar {
+  height: 8px;
+  background: var(--bg-card);
+  border-radius: 99px;
+  border: 1px solid var(--border);
+  overflow: hidden;
+}
+.upscale-progress-fill {
+  height: 100%;
+  background: var(--accent, #4f8ef7);
+  border-radius: 99px;
+  transition: width 0.4s ease;
+}
+.upscale-log {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 10px 12px;
+  max-height: 220px;
+  overflow-y: auto;
+  font-family: monospace;
+  font-size: 0.8rem;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-top: 8px;
+}
+.upscale-log-line { line-height: 1.5; }
+.log-ok   { color: #4ade80; }
+.log-err  { color: #f87171; }
+.log-info { color: var(--text-muted); }
+
+.preset-also-apply {
+  font-size: 0.78rem;
+  margin-top: 2px;
 }

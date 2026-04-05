@@ -1,6 +1,7 @@
 """
 Photo endpoints — scanning, listing, serving, rotating, cropping, editing, and upscaling.
 """
+import asyncio
 import hashlib
 import io
 import os
@@ -9,10 +10,13 @@ from pathlib import Path
 from typing import Optional
 
 from dotenv import load_dotenv
-from fastapi import APIRouter, HTTPException, Body, UploadFile, File
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Body, UploadFile, File
 from fastapi.responses import FileResponse
 from PIL import Image
 from pydantic import BaseModel
+
+# In-progress batch upscale jobs: job_id -> progress dict
+_active_upscale_jobs: dict[str, dict] = {}
 
 from backend import config
 from backend.images.scanner import scan_image_paths, scan_all_image_paths, get_image_info, count_photos_by_folder
@@ -1271,6 +1275,55 @@ async def get_preset_recommendation(photo_id: str, run_id: str = None):
     }
 
 
+@router.get("/runs/{run_id}/preset-recommendations")
+async def get_run_preset_recommendations(run_id: str):
+    """
+    Return top-3 preset recommendations for every photo in a run, using the
+    stored metadata. Fast — no additional AI calls required.
+    """
+    import json as _json
+    from backend.analysis.preset_matcher import get_recommendations, get_danger_zones
+
+    if run_id == "all":
+        merged: list[dict] = []
+        if config.RUNS_DIR.exists():
+            for run_file in sorted(config.RUNS_DIR.glob("*.json")):
+                try:
+                    with open(run_file) as f:
+                        data = _json.load(f)
+                    merged.extend(data.get("results", []))
+                except Exception:
+                    pass
+        results_data = merged
+    else:
+        run_path = config.RUNS_DIR / f"{run_id}.json"
+        if not run_path.exists():
+            raise HTTPException(status_code=404, detail="Run not found")
+        with open(run_path) as f:
+            run_data = _json.load(f)
+        results_data = run_data.get("results", [])
+
+    dangers = get_danger_zones()
+    output = []
+    for r in results_data:
+        metadata = r.get("metadata") or {}
+        recs = get_recommendations(metadata, max_results=3)
+        output.append({
+            "filename": r.get("filename"),
+            "image_id": r.get("image_id"),
+            "output_name": r.get("output_name"),
+            "photo_quality": metadata.get("photo_quality"),
+            "primary_style": r.get("primary_style"),
+            "recommendations": recs,
+        })
+
+    return {
+        "run_id": run_id,
+        "photos": output,
+        "danger_zones": dangers,
+    }
+
+
 @router.get("/processed")
 async def list_processed():
     """List all photos in the processed/ folder."""
@@ -1285,6 +1338,45 @@ async def list_processed():
         "total": len(files),
         "folder": str(config.OUTPUT_DIR),
     }
+
+
+@router.get("/processed/download")
+async def download_processed():
+    """Download all files in processed/ as a ZIP."""
+    import asyncio
+    import concurrent.futures
+    import tempfile
+    import zipfile as _zipfile
+    from fastapi.responses import FileResponse
+    from starlette.background import BackgroundTask
+
+    config.OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    exts = {e.lower() for e in config.SUPPORTED_EXTENSIONS}
+    files = [
+        p for p in sorted(config.OUTPUT_DIR.rglob("*"))
+        if p.is_file() and p.suffix.lower() in exts
+    ]
+    if not files:
+        raise HTTPException(status_code=404, detail="No processed photos found")
+
+    def _build_zip() -> str:
+        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".zip")
+        with _zipfile.ZipFile(tmp, mode="w", compression=_zipfile.ZIP_STORED) as zf:
+            for p in files:
+                zf.write(str(p), arcname=p.name)
+        tmp.close()
+        return tmp.name
+
+    loop = asyncio.get_event_loop()
+    with concurrent.futures.ThreadPoolExecutor() as pool:
+        zip_path = await loop.run_in_executor(pool, _build_zip)
+
+    return FileResponse(
+        path=zip_path,
+        media_type="application/zip",
+        filename="upscaled_photos.zip",
+        background=BackgroundTask(os.unlink, zip_path),
+    )
 
 
 class BatchRenameRequest(BaseModel):
@@ -1340,145 +1432,139 @@ async def batch_rename(req: BatchRenameRequest):
 class BatchEnhanceRequest(BaseModel):
     photo_ids: list[str]
     run_id: Optional[str] = None
-    crop: bool = False
-    upscale: bool = False
-    upscale_mode: str = "enhance"
-    save: bool = False
-    rename_to_preset: bool = False
+    upscale_mode: str = "hd_restore"
 
 
-@router.post("/photos/batch-enhance")
-async def batch_enhance(req: BatchEnhanceRequest):
-    """
-    Full-pipeline batch processing: for each photo, apply its best recommended
-    crop and/or AI upscale, then save to processed/.
-    """
-    import json
-    from backend.analysis.crop_matcher import get_crop_options
+async def _run_batch_upscale(job_id: str, photo_ids: list[str], run_id: Optional[str], upscale_mode: str):
+    """Background task: upscale each photo with Gemini and save to processed/."""
+    import json as _json
+    from google import genai
+    from google.genai import types
 
-    metadata_map = {}
-    if req.run_id:
-        run_path = config.RUNS_DIR / f"{req.run_id}.json"
-        if run_path.exists():
-            with open(run_path, "r") as f:
-                run_data = json.load(f)
-            for r in run_data.get("results", []):
-                metadata_map[r.get("image_id")] = r.get("metadata", {})
+    progress = _active_upscale_jobs[job_id]
+    prompt = UPSCALE_PROMPTS.get(upscale_mode, UPSCALE_PROMPTS["hd_restore"])
 
-    upscale_mode = req.upscale_mode if req.upscale_mode in UPSCALE_PROMPTS else "enhance"
-    prompt = UPSCALE_PROMPTS[upscale_mode]
+    api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+    if not api_key:
+        progress["status"] = "error"
+        progress["log"].append("✗ No Gemini API key found — set GEMINI_API_KEY in .env")
+        return
 
-    results = []
-    errors = []
+    client = genai.Client(api_key=api_key)
+    config.OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-    for pid in req.photo_ids:
+    for i, pid in enumerate(photo_ids):
+        if progress.get("cancelled"):
+            progress["log"].append("— Job cancelled by user")
+            break
+
         path = _find_photo(pid)
         if not path or not path.exists():
-            errors.append({"photo_id": pid, "error": "Photo not found"})
+            progress["errors"] += 1
+            progress["log"].append(f"✗ [{i+1}/{len(photo_ids)}] Photo not found: {pid}")
+            progress["completed"] += 1
             continue
+
+        filename = path.name
+        progress["log"].append(f"⏳ [{i+1}/{len(photo_ids)}] Upscaling {filename}...")
 
         try:
             img = Image.open(path)
             img = fix_orientation(img)
             img = img.convert("RGB")
-            ops = []
 
-            if req.crop:
-                metadata = metadata_map.get(pid, {})
-                crop_opts = get_crop_options(
-                    metadata,
-                    img_width=img.width,
-                    img_height=img.height,
-                    max_options=1,
-                )
-                if crop_opts:
-                    c = crop_opts[0]["crop"]
-                    img = crop_image(img, c["x"], c["y"], c["w"], c["h"])
-                    ops.append("cropped")
+            buf = io.BytesIO()
+            img.save(buf, format="JPEG", quality=95)
+            img.close()
 
-            config.OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-
-            preset_stem = None
-            if req.rename_to_preset:
-                preset_stem = _get_preset_filename(pid, req.run_id, path.name)
-
-            def _batch_out_path(fallback_name: str) -> Path:
-                if preset_stem:
-                    return _unique_path(config.OUTPUT_DIR, preset_stem)
-                return config.OUTPUT_DIR / fallback_name
-
-            if req.upscale:
-                buf = io.BytesIO()
-                img.save(buf, format="JPEG", quality=95)
-                img.close()
-
-                from google import genai
-                from google.genai import types
-
-                api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
-                if not api_key:
-                    errors.append({"photo_id": pid, "error": "No API key"})
-                    continue
-
-                client = genai.Client(api_key=api_key)
-                response = client.models.generate_content(
+            response = await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda b=buf.getvalue(): client.models.generate_content(
                     model=config.EDIT_MODEL,
                     contents=[types.Content(
                         role="user",
                         parts=[
-                            types.Part.from_bytes(data=buf.getvalue(), mime_type="image/jpeg"),
+                            types.Part.from_bytes(data=b, mime_type="image/jpeg"),
                             types.Part.from_text(text=prompt),
                         ],
                     )],
                     config=types.GenerateContentConfig(response_modalities=["IMAGE", "TEXT"]),
                 )
+            )
 
-                image_data = None
-                try:
-                    for part in response.candidates[0].content.parts:
-                        if hasattr(part, "inline_data") and part.inline_data:
-                            image_data = part.inline_data.data
-                            break
-                except (IndexError, AttributeError):
-                    pass
+            image_data = None
+            try:
+                for part in response.candidates[0].content.parts:
+                    if hasattr(part, "inline_data") and part.inline_data:
+                        image_data = part.inline_data.data
+                        break
+            except (IndexError, AttributeError):
+                pass
 
-                if not image_data:
-                    errors.append({"photo_id": pid, "error": "Upscale API returned no image"})
-                    continue
+            if not image_data:
+                progress["errors"] += 1
+                progress["log"][-1] = f"✗ [{i+1}/{len(photo_ids)}] {filename} — API returned no image"
+                progress["completed"] += 1
+                continue
 
-                ops.append("enhanced")
-                suffix = "_".join(ops)
-                out_path = _batch_out_path(f"{path.stem}_{suffix}.jpg")
-                with open(out_path, "wb") as f:
-                    f.write(image_data)
-            elif req.save or req.crop:
-                suffix = "_".join(ops) if ops else "processed"
-                out_path = _batch_out_path(f"{path.stem}_{suffix}.jpg")
-                img.save(str(out_path), format="JPEG", quality=95)
-                img.close()
-                if req.save:
-                    ops.append("saved")
-            else:
-                img.close()
-                out_path = None
+            out_path = _unique_path(config.OUTPUT_DIR, f"{path.stem}_hd.jpg")
+            with open(out_path, "wb") as f:
+                f.write(image_data)
 
-            results.append({
-                "photo_id": pid,
-                "filename": path.name,
-                "output": out_path.name if out_path else None,
-                "operations": ops,
-                "status": "ok",
-            })
+            progress["results"].append({"photo_id": pid, "filename": filename, "output": out_path.name})
+            progress["log"][-1] = f"✓ [{i+1}/{len(photo_ids)}] {filename} → {out_path.name}"
+            progress["completed"] += 1
 
         except Exception as e:
-            errors.append({"photo_id": pid, "error": str(e)})
+            progress["errors"] += 1
+            progress["log"][-1] = f"✗ [{i+1}/{len(photo_ids)}] {filename} — {e}"
+            progress["completed"] += 1
 
-    return {
-        "results": results,
-        "errors": errors,
-        "total_processed": len(results),
-        "total_errors": len(errors),
+    progress["status"] = "done"
+
+
+@router.post("/photos/batch-enhance")
+async def batch_enhance(req: BatchEnhanceRequest, background_tasks: BackgroundTasks):
+    """
+    Start an async batch HD upscale job. Returns a job_id immediately.
+    Poll GET /photos/batch-enhance/progress for live updates.
+    """
+    import uuid
+    job_id = str(uuid.uuid4())[:8]
+    upscale_mode = req.upscale_mode if req.upscale_mode in UPSCALE_PROMPTS else "hd_restore"
+
+    progress = {
+        "job_id": job_id,
+        "status": "running",
+        "total": len(req.photo_ids),
+        "completed": 0,
+        "errors": 0,
+        "results": [],
+        "log": [f"Starting HD upscale for {len(req.photo_ids)} photo(s)..."],
     }
+    _active_upscale_jobs[job_id] = progress
+    background_tasks.add_task(
+        _run_batch_upscale, job_id, req.photo_ids, req.run_id, upscale_mode
+    )
+    return {"job_id": job_id, "status": "running", "total": len(req.photo_ids)}
+
+
+@router.get("/photos/batch-enhance/progress")
+async def get_batch_enhance_progress():
+    """Return the most recent active batch upscale job progress."""
+    if not _active_upscale_jobs:
+        return {"status": "idle", "total": 0, "completed": 0, "errors": 0, "log": [], "results": []}
+    job_id = next(reversed(_active_upscale_jobs))
+    return _active_upscale_jobs[job_id]
+
+
+@router.get("/photos/batch-enhance/progress/{job_id}")
+async def get_batch_enhance_progress_by_id(job_id: str):
+    """Return progress for a specific upscale job."""
+    job = _active_upscale_jobs.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return job
 
 
 # ── Saved / Shortlist ────────────────────────────────────────────────────────

@@ -16,13 +16,24 @@
 
 const API_BASE = '/api'
 
-async function get(path) {
-  const response = await fetch(`${API_BASE}${path}`)
-  if (!response.ok) {
-    const error = await response.json().catch(() => ({ detail: response.statusText }))
-    throw new Error(error.detail || `API error: ${response.status}`)
+function buildFetchError(path, error) {
+  if (error?.name === 'TypeError') {
+    return new Error(`Backend unavailable for ${path}. Check that FastAPI is running on localhost:8000.`)
   }
-  return response.json()
+  return error instanceof Error ? error : new Error(`Request failed for ${path}`)
+}
+
+async function get(path) {
+  try {
+    const response = await fetch(`${API_BASE}${path}`)
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({ detail: response.statusText }))
+      throw new Error(error.detail || `API error: ${response.status}`)
+    }
+    return response.json()
+  } catch (error) {
+    throw buildFetchError(path, error)
+  }
 }
 
 async function post(path, params = {}) {
@@ -32,25 +43,33 @@ async function post(path, params = {}) {
       url.searchParams.set(key, value)
     }
   })
-  const response = await fetch(url.toString(), { method: 'POST' })
-  if (!response.ok) {
-    const error = await response.json().catch(() => ({ detail: response.statusText }))
-    throw new Error(error.detail || `API error: ${response.status}`)
+  try {
+    const response = await fetch(url.toString(), { method: 'POST' })
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({ detail: response.statusText }))
+      throw new Error(error.detail || `API error: ${response.status}`)
+    }
+    return response.json()
+  } catch (error) {
+    throw buildFetchError(path, error)
   }
-  return response.json()
 }
 
 async function postJson(path, body) {
-  const response = await fetch(`${API_BASE}${path}`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  })
-  if (!response.ok) {
-    const error = await response.json().catch(() => ({ detail: response.statusText }))
-    throw new Error(error.detail || `API error: ${response.status}`)
+  try {
+    const response = await fetch(`${API_BASE}${path}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    })
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({ detail: response.statusText }))
+      throw new Error(error.detail || `API error: ${response.status}`)
+    }
+    return response.json()
+  } catch (error) {
+    throw buildFetchError(path, error)
   }
-  return response.json()
 }
 
 // ── Photo endpoints ─────────────────────────────────────────────────────
@@ -153,16 +172,31 @@ export async function batchProcess(photoIds, actions) {
   return postJson('/photos/batch-process', { photo_ids: photoIds, actions })
 }
 
-export async function batchEnhance(photoIds, { runId, crop, upscale, upscaleMode, save, renameToPreset } = {}) {
+export async function batchEnhance(photoIds, { runId, upscaleMode } = {}) {
   return postJson('/photos/batch-enhance', {
     photo_ids: photoIds,
     run_id: runId || null,
-    crop: !!crop,
-    upscale: !!upscale,
-    upscale_mode: upscaleMode || 'enhance',
-    save: !!save,
-    rename_to_preset: !!renameToPreset,
+    upscale_mode: upscaleMode || 'hd_restore',
   })
+}
+
+export async function getBatchEnhanceProgress(jobId) {
+  const path = jobId ? `/photos/batch-enhance/progress/${jobId}` : '/photos/batch-enhance/progress'
+  return get(path)
+}
+
+export async function downloadProcessedPhotos() {
+  const response = await fetch(`${API_BASE}/processed/download`)
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({ detail: response.statusText }))
+    throw new Error(err.detail || `Download failed: ${response.status}`)
+  }
+  const blob = await response.blob()
+  const a = document.createElement('a')
+  a.href = URL.createObjectURL(blob)
+  a.download = 'upscaled_photos.zip'
+  a.click()
+  URL.revokeObjectURL(a.href)
 }
 
 export async function batchRename(photoIds, runId) {
@@ -175,6 +209,10 @@ export async function batchRename(photoIds, runId) {
 export async function getPresetRecommendation(photoId, runId) {
   const params = runId ? `?run_id=${runId}` : ''
   return get(`/photos/${photoId}/preset-recommendation${params}`)
+}
+
+export async function getRunPresetRecommendations(runId) {
+  return get(`/runs/${runId}/preset-recommendations`)
 }
 
 export async function getCropOptions(photoId, runId) {
@@ -248,10 +286,6 @@ export function upscalePreviewUrl(photoId, { crop, adjustments, mode, onProgress
     xhr.onerror = () => reject(new Error('Network error'))
     xhr.send(body)
   })
-}
-
-export async function listProcessed() {
-  return get('/processed')
 }
 
 export async function blurPreviewUrl(photoId) {
