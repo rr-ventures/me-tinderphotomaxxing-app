@@ -3612,6 +3612,32 @@ details.runs-history[open] .runs-history-summary::before {
   background: var(--accent-hover);
 }
 
+.view-mode-btn-clear {
+  color: var(--text-muted);
+  font-size: 0.76rem;
+  padding: 4px 10px;
+  margin-left: auto;
+}
+
+.view-mode-btn-clear:hover {
+  color: var(--danger);
+  background: rgba(var(--danger-rgb, 220, 38, 38), 0.08);
+}
+
+.view-mode-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.ai-progress-inline {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+}
+
 .view-mode-sub {
   font-weight: 400;
   opacity: 0.82;

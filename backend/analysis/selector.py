@@ -59,7 +59,7 @@ def select_styles(metadata: PhotoMetadata) -> StyleResult:
 
     All matching rules are collected, then the most specific one (most conditions)
     wins. Among equally specific matches, the one that appears earliest in the YAML
-    is preferred. Fallback is always true_to_life_clean.
+    is preferred (lowest index wins). Fallback is always true_to_life_clean.
     """
     rules = get_routing_rules()
     pairings = get_secondary_pairing()
@@ -67,14 +67,14 @@ def select_styles(metadata: PhotoMetadata) -> StyleResult:
     reason = "Default fallback — no specific style matched strongly"
 
     matching_rules = [
-        (rule, _count_conditions(rule))
-        for rule in rules
+        (rule, _count_conditions(rule), idx)
+        for idx, rule in enumerate(rules)
         if _matches_rule(metadata, rule)
     ]
 
     if matching_rules:
-        # Pick the most specific match (most conditions); ties break by YAML order (index 0)
-        best_rule, _ = max(matching_rules, key=lambda x: x[1])
+        # Most conditions wins; ties break by earliest YAML position (lowest idx)
+        best_rule, _, _ = max(matching_rules, key=lambda x: (x[1], -x[2]))
         primary = best_rule.get("choose", FALLBACK_STYLE)
         reason = best_rule.get("rule", "Matched routing rule")
 

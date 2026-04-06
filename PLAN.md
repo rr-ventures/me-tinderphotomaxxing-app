@@ -4,28 +4,28 @@ overview: "Fix 8 distinct issues across the app: folder-based photo lifecycle ma
 todos:
   - id: folders
     content: Add analyzed/ and errored/ folders to config, update scanner and photo-serving routes to look in all folders
-    status: pending
+    status: done
   - id: rate-limit-backoff
     content: Fix Gemini client to parse retryDelay from 429 response and use it; reduce ANALYSIS_CONCURRENCY from 5 to 3
-    status: pending
+    status: done
   - id: file-lifecycle
     content: Move files to analyzed/ on success and errored/ on permanent failure after batch analysis
-    status: pending
+    status: done
   - id: retry-endpoint
     content: Add POST /analyze/retry/{run_id} backend endpoint and Retry Failed button on Analysis page
-    status: pending
+    status: done
   - id: compare-ui
     content: Replace Hold to Compare + 3-up grid with three clickable Original/Clarity/Full Enhance swap buttons in PhotoDetail
-    status: pending
+    status: done
   - id: preset-css-audit
     content: Audit and fix all PRESET_FILTERS CSS mappings in PhotoDetail.jsx to match actual Lightroom preset behavior
-    status: pending
+    status: done
   - id: enhance-prompt
     content: Replace Full Enhance upscale prompt with portrait-focused best-practice prompt in backend and frontend
-    status: pending
+    status: done
   - id: selector-consistency
     content: Fix selector.py tie-breaking so similar photos get consistent preset recommendations
-    status: pending
+    status: done
 isProject: false
 ---
 

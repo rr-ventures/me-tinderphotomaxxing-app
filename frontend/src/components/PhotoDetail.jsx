@@ -49,16 +49,15 @@ const PROMPTS = {
     '- Preserve the exact same colours, white balance, exposure, and mood\n\n' +
     'FORBIDDEN: No AI smoothing, no face changes, no background changes, no colour grading, no halos.',
   enhance:
-    'Elevate this photo to the standard of a high-end professional shoot — naturally and ' +
-    'undetectably, as if a skilled photographer had captured it under ideal conditions.\n\n' +
-    'WHAT TO DO:\n' +
-    '- Simulate the look of a Sony A1 + 85mm f/1.4 at ISO 100: tack-sharp subject, premium colour rendition, cinematic depth\n' +
-    '- Sharpen the subject: hair detail, skin texture (visible pores, not plastic), eye catchlights, fabric texture\n' +
-    '- Improve dynamic range: lift blocked shadows, gently recover blown highlights — subtle, like skilled dodge-and-burn\n' +
-    '- Refine lighting: soft natural directionality, warm highlights, slightly cooler shadows — as if shot with open sky or large softbox\n' +
-    '- Apply a clean editorial colour grade: lift midtones slightly, gentle warmth to skin, subtly desaturate distracting background colours\n' +
-    '- Remove sensor noise and compression artefacts, replace with subtle natural micro-texture\n\n' +
-    'FORBIDDEN: No beauty filters, no face reshaping, no skin smoothing, no dramatic background blur, no HDR tonemapping.',
+    'Enhance this portrait photo to professional quality. Preserve 100% of the original ' +
+    'identity — face structure, expression, pose, clothing, and background must remain ' +
+    'unchanged. Recover fine detail: sharp facial features, natural skin texture with ' +
+    'visible pores, realistic hair strands, and clean edges. Apply balanced cinematic ' +
+    'lighting with improved dynamic range — lift shadows slightly, recover highlights, ' +
+    'without relighting or reshaping. Remove compression artifacts and digital noise. ' +
+    'Apply controlled sharpening. Do NOT smooth skin artificially, do NOT alter facial ' +
+    'anatomy, do NOT change colors dramatically. Output: the same photo, only clearer, ' +
+    'sharper, and higher resolution.',
 }
 
 const PRESET_FILTERS = {
@@ -66,7 +65,7 @@ const PRESET_FILTERS = {
   'Adaptive: Subject > Light': 'brightness(1.2) contrast(0.92) saturate(1.05)',
   'Adaptive: Subject > Vibrant': 'saturate(1.4) contrast(1.08) brightness(1.03)',
   'Adaptive: Subject > Warm Light': 'brightness(1.12) saturate(1.12) sepia(0.14) contrast(0.98)',
-  'Adaptive: Subject > Pop': 'brightness(1.04) contrast(1.08) saturate(1.03)',
+  'Adaptive: Subject > Pop': 'brightness(1.1) contrast(1.18) saturate(1.1)',
   'Adaptive: Subject > Balance Contrast': 'brightness(1.02) contrast(1.12) saturate(1.0)',
   'Adaptive: Portrait > Polished Portrait': 'brightness(1.04) contrast(1.04) saturate(1.04)',
   'Adaptive: Portrait > Enhance Portrait': 'brightness(1.1) contrast(1.1) saturate(1.08) hue-rotate(2deg)',
@@ -112,11 +111,11 @@ function PhotoDetail({ photo, result, runId, onClose, onPrev, onNext, isShortlis
   const [appliedCropLabel, setAppliedCropLabel] = useState(null)
   const [cropLoading, setCropLoading] = useState(false)
 
-  const [upscaleApplied, setUpscaleApplied] = useState(false)
-  const [upscaleLoading, setUpscaleLoading] = useState(false)
-  const [upscaleSrc, setUpscaleSrc] = useState(null)
-  const [upscaleStep, setUpscaleStep] = useState('')
-  const [upscaleProgressPct, setUpscaleProgressPct] = useState(null)
+  const [aiLoading, setAiLoading] = useState(false)
+  const [claritySrc, setClaritySrc] = useState(null)
+  const [enhanceSrc, setEnhanceSrc] = useState(null)
+  const [aiStep, setAiStep] = useState('')
+  const [aiProgressPct, setAiProgressPct] = useState(null)
   const monotonicRef = useRef(null)
 
   function clearMonotonic() {
@@ -141,11 +140,11 @@ function PhotoDetail({ photo, result, runId, onClose, onPrev, onNext, isShortlis
     return () => window.removeEventListener('keydown', handleKey)
   }, [onClose, onPrev, onNext])
 
-  // Compare: 'original' | 'hd_restore'
+  // Compare: 'original' | 'clarity' | 'enhance'
   const [viewMode, setViewMode] = useState('original')
 
-  const aiBlobsRef = useRef({ hd: null })
-  aiBlobsRef.current = { hd: upscaleSrc }
+  const aiBlobsRef = useRef({ clarity: null, enhance: null })
+  aiBlobsRef.current = { clarity: claritySrc, enhance: enhanceSrc }
 
   const [presetPreviewFilter, setPresetPreviewFilter] = useState(null)
   const [blurPreviewSrc, setBlurPreviewSrc] = useState(null)
@@ -158,15 +157,16 @@ function PhotoDetail({ photo, result, runId, onClose, onPrev, onNext, isShortlis
 
   // New photo → reset AI UI; cleanup revokes latest blob URLs via ref (avoids stale closures).
   useEffect(() => {
-    setUpscaleApplied(false)
-    setUpscaleSrc(null)
+    setClaritySrc(null)
+    setEnhanceSrc(null)
     setViewMode('original')
-    setUpscaleProgressPct(null)
-    setUpscaleStep('')
+    setAiProgressPct(null)
+    setAiStep('')
     clearMonotonic()
     return () => {
-      const { hd } = aiBlobsRef.current
-      revokeObjectUrlSafe(hd)
+      const { clarity, enhance } = aiBlobsRef.current
+      revokeObjectUrlSafe(clarity)
+      revokeObjectUrlSafe(enhance)
     }
   }, [photo.id])
 
@@ -201,11 +201,8 @@ function PhotoDetail({ photo, result, runId, onClose, onPrev, onNext, isShortlis
 
   const refreshPreview = useCallback(async (cropVal, adjVal) => {
     // Crop / style changed → AI previews are no longer valid; clear without forcing user to “revert” manually.
-    setUpscaleSrc((u) => {
-      revokeObjectUrlSafe(u)
-      return null
-    })
-    setUpscaleApplied(false)
+    setClaritySrc((u) => { revokeObjectUrlSafe(u); return null })
+    setEnhanceSrc((u) => { revokeObjectUrlSafe(u); return null })
     setViewMode('original')
     const hasCrop = cropVal && !(cropVal.x === 0 && cropVal.y === 0 && cropVal.w === 100 && cropVal.h === 100)
     if (!hasCrop && !adjVal) { setPreviewSrc(null); return }
@@ -254,56 +251,57 @@ function PhotoDetail({ photo, result, runId, onClose, onPrev, onNext, isShortlis
     setStatus(null)
   }
 
-  async function tryAiHdRestore() {
-    setUpscaleLoading(true)
-    setUpscaleProgressPct(0)
-    setUpscaleStep('Sending to Gemini AI HD Restore…')
+  const AI_MODE_LABELS = { clarity: 'Clarity', enhance: 'Full Enhance' }
+
+  async function tryAiPreview(mode) {
+    const setter = mode === 'clarity' ? setClaritySrc : setEnhanceSrc
+    const label = AI_MODE_LABELS[mode]
+    setAiLoading(true)
+    setAiProgressPct(0)
+    setAiStep(`Sending to Gemini ${label}…`)
     setStatus(null)
-    setUpscaleApplied(false)
-    revokeObjectUrlSafe(upscaleSrc)
-    setUpscaleSrc(null)
     clearMonotonic()
 
     const hasCrop = appliedCrop && !(appliedCrop.x === 0 && appliedCrop.y === 0 && appliedCrop.w === 100 && appliedCrop.h === 100)
     const opts = { crop: hasCrop ? appliedCrop : null, adjustments: appliedAdjustments }
 
     try {
-      const hdUrl = await upscalePreviewUrl(photo.id, {
+      const url = await upscalePreviewUrl(photo.id, {
         ...opts,
-        mode: 'hd_restore',
+        mode,
         onProgress: (p) => {
-          setUpscaleProgressPct(p)
-          setUpscaleStep(p >= 100 ? '100% — Done' : `${p}% — Gemini processing…`)
+          setAiProgressPct(p)
+          setAiStep(p >= 100 ? '100% — Done' : `${p}% — Gemini processing…`)
         },
       })
-      setUpscaleSrc(hdUrl)
-      setUpscaleApplied(true)
-      setViewMode('hd_restore')
-      setUpscaleProgressPct(100)
-      setUpscaleStep('Done — HD Restore complete')
+      setter(url)
+      setViewMode(mode)
+      setAiProgressPct(100)
+      setAiStep(`Done — ${label} complete`)
       setStatus({
         type: 'success',
-        message: 'HD Restore preview ready. Click "Save" to save this version to processed/.',
+        message: `${label} preview ready. Click "Save" to save this version to processed/.`,
       })
     } catch (err) {
-      setStatus({ type: 'error', message: `AI HD Restore failed: ${err.message}` })
+      setStatus({ type: 'error', message: `${label} failed: ${err.message}` })
     } finally {
       clearMonotonic()
-      setUpscaleLoading(false)
-      setUpscaleProgressPct(null)
-      setUpscaleStep('')
+      setAiLoading(false)
+      setAiProgressPct(null)
+      setAiStep('')
     }
   }
 
   function clearAiPreviews() {
-    revokeObjectUrlSafe(upscaleSrc)
-    setUpscaleApplied(false)
-    setUpscaleSrc(null)
+    revokeObjectUrlSafe(claritySrc)
+    revokeObjectUrlSafe(enhanceSrc)
+    setClaritySrc(null)
+    setEnhanceSrc(null)
     setViewMode('original')
     setStatus(null)
     clearMonotonic()
-    setUpscaleProgressPct(null)
-    setUpscaleStep('')
+    setAiProgressPct(null)
+    setAiStep('')
   }
 
   async function handleSave() {
@@ -311,13 +309,13 @@ function PhotoDetail({ photo, result, runId, onClose, onPrev, onNext, isShortlis
     setStatus(null)
     try {
       const hasCrop = appliedCrop && !(appliedCrop.x === 0 && appliedCrop.y === 0 && appliedCrop.w === 100 && appliedCrop.h === 100)
-      const modeToSave = upscaleApplied ? 'hd_restore' : null
+      const aiActive = viewMode !== 'original' && (claritySrc || enhanceSrc)
       const res = await processPhoto(photo.id, {
         rotate: true,
         crop: hasCrop ? appliedCrop : null,
         adjustments: appliedAdjustments,
-        upscale: upscaleApplied,
-        upscale_mode: modeToSave,
+        upscale: !!aiActive,
+        upscale_mode: aiActive ? viewMode : null,
         output_filename: filename || null,
       })
       setStatus({ type: 'success', message: `Saved as ${res.filename}` })
@@ -328,21 +326,17 @@ function PhotoDetail({ photo, result, runId, onClose, onPrev, onNext, isShortlis
     }
   }
 
-  // Processed (bulk upscaled) photo URL — served as a static file by the backend
-  const processedSrc = processedFilename ? `/processed/${processedFilename}` : null
-
   // Pick the right image source for the main view
   function _getMainSrc() {
     const base = previewSrc || originalSrc
-    const hdSrc = upscaleSrc || processedSrc
-    if (viewMode === 'hd_restore' && hdSrc) return hdSrc
+    if (viewMode === 'clarity' && claritySrc) return claritySrc
+    if (viewMode === 'enhance' && enhanceSrc) return enhanceSrc
     return base
   }
 
   const mainSrc = _getMainSrc()
-  const isHdAvailable = !!(upscaleSrc || processedSrc)
-  const hasEdits = !!appliedCrop || !!appliedAdjustments || isHdAvailable
-  const aiOptionsReady = isHdAvailable
+  const isAiAvailable = !!(claritySrc || enhanceSrc)
+  const hasEdits = !!appliedCrop || !!appliedAdjustments || isAiAvailable
 
   if (!result) {
     return (
@@ -437,28 +431,51 @@ function PhotoDetail({ photo, result, runId, onClose, onPrev, onNext, isShortlis
             )}
 
             <div className="photo-controls-bar">
-              {/* Compare: original vs HD Restore */}
-              {aiOptionsReady && !cropMode && (
+              {!cropMode && (
                 <div className="view-mode-bar view-mode-bar-ai">
                   <button
                     type="button"
                     className={`view-mode-btn ${viewMode === 'original' ? 'view-mode-btn-active' : ''}`}
                     onClick={() => setViewMode('original')}
-                    title="Original without AI"
+                    title="Original photo"
                   >
                     Original
                   </button>
                   <button
                     type="button"
-                    className={`view-mode-btn ${viewMode === 'hd_restore' ? 'view-mode-btn-active' : ''}`}
-                    onClick={() => setViewMode('hd_restore')}
-                    title="HD Restore — Gemini AI super-resolution"
+                    className={`view-mode-btn ${viewMode === 'clarity' ? 'view-mode-btn-active' : ''}`}
+                    onClick={() => claritySrc ? setViewMode('clarity') : tryAiPreview('clarity')}
+                    disabled={aiLoading}
+                    title="Clarity — AI sharpening and detail recovery"
                   >
-                    HD Restore
+                    {aiLoading && !claritySrc && viewMode !== 'enhance' ? 'Loading…' : claritySrc ? 'Clarity' : '+ Clarity'}
                   </button>
-                  <span className="view-mode-hint">
-                    Click to compare.{processedSrc && !upscaleSrc ? ' Bulk upscaled.' : ''} <strong>Save</strong> will use the HD Restore version.
-                  </span>
+                  <button
+                    type="button"
+                    className={`view-mode-btn ${viewMode === 'enhance' ? 'view-mode-btn-active' : ''}`}
+                    onClick={() => enhanceSrc ? setViewMode('enhance') : tryAiPreview('enhance')}
+                    disabled={aiLoading}
+                    title="Full Enhance — professional portrait enhancement"
+                  >
+                    {aiLoading && !enhanceSrc && viewMode !== 'clarity' ? 'Loading…' : enhanceSrc ? 'Full Enhance' : '+ Full Enhance'}
+                  </button>
+                  {isAiAvailable && (
+                    <button
+                      type="button"
+                      className="view-mode-btn view-mode-btn-clear"
+                      onClick={clearAiPreviews}
+                      title="Clear AI previews and return to original"
+                    >
+                      Clear
+                    </button>
+                  )}
+                </div>
+              )}
+
+              {aiLoading && (
+                <div className="ai-progress-inline">
+                  <div className="upscale-spinner" />
+                  <span>{aiStep}</span>
                 </div>
               )}
 
@@ -467,7 +484,7 @@ function PhotoDetail({ photo, result, runId, onClose, onPrev, onNext, isShortlis
                   {[
                     appliedCrop && 'Cropped',
                     appliedAdjustments && 'Styled',
-                    isHdAvailable && (viewMode === 'original' ? 'HD Ready (viewing original)' : 'HD Restore'),
+                    isAiAvailable && (viewMode === 'original' ? 'AI Ready (viewing original)' : AI_MODE_LABELS[viewMode]),
                   ].filter(Boolean).join(' + ')}
                 </div>
               )}
@@ -772,8 +789,8 @@ function PhotoDetail({ photo, result, runId, onClose, onPrev, onNext, isShortlis
                 type="button"
                 className="btn btn-primary btn-large save-btn"
                 onClick={handleSave}
-                disabled={saving || upscaleLoading}
-                title={upscaleLoading ? 'Wait for AI previews to finish' : undefined}
+                disabled={saving || aiLoading}
+                title={aiLoading ? 'Wait for AI previews to finish' : undefined}
               >
                 {saving
                   ? 'Saving...'
